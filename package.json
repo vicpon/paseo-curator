@@ -1,0 +1,35 @@
+{
+  "name": "curator",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Daemon-side automatic skill learning for Paseo",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "paseo-plugin.json",
+    "README.md",
+    "OVERVIEW.md",
+    "OVERVIEW.*.md",
+    "index.server.ts",
+    "server/",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@getpaseo/protocol": "0.16.0-beta.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.16.0-beta.2",
+    "@types/node": "^26.6.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0"
+  }
+}

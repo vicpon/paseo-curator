@@ -1,0 +1,10 @@
+{
+  "id": "curator",
+  "name": "Curator",
+  "description": "Automatic guarded skill learning from completed Paseo turns",
+  "$comment": "Daemon-side Paseo plugin. Server-only; no UI in the first version.",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.16.0-beta.2"
+  }
+}
