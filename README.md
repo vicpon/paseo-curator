@@ -1,6 +1,17 @@
 # Paseo Curator
 
-Daemon-side automatic skill learning for Paseo. Completed source turns are counted by unique tool-call iteration; after the default threshold, an isolated curator reviews the exact turn and proposes structured skill operations. A plugin-owned manager validates and applies those operations under `~/.agents/skills/`.
+Paseo agents often solve the same problems more than once: a brittle test command, an API quirk, a deployment check, or a debugging sequence that took several attempts to get right. Paseo Curator turns those verified lessons into reusable skills under `~/.agents/skills/`, where future agents can find them instead of rediscovering the same fix in a new session.
+
+It brings Hermes-style automatic skill learning to the Paseo daemon, so learning is not tied to one foreground agent or session. It does **not** create a new skill after every turn. The plugin waits until a source agent has accumulated 10 tool calls, then reviews the completed turn for a lesson that is both reusable and proven to work. A review that finds no durable lesson ends with `nothing_to_save`. When there is something worth keeping, the curator prefers to update a relevant existing skill and creates a new one only when no existing skill fits.
+
+For example, it can preserve:
+
+- a corrected command or setup step that fixed a recurring failure;
+- a reliable debugging workflow that produced a verified result;
+- a project or tool constraint that an existing skill omitted;
+- a repeatable sequence that should become a checklist or helper script.
+
+The curator does not edit files directly. It returns a small set of proposed actions such as "create this skill," "replace this exact text," or "add this support file." The plugin checks paths, provenance, read-before-write evidence, operation limits, and rollback safety before changing the shared skill library. This keeps the useful part of autonomous learning without giving the reviewing agent unrestricted write access.
 
 ## Requirements
 
