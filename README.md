@@ -68,7 +68,7 @@ paseo plugin reload curator
 paseo plugin ls curator --json
 ```
 
-The plugin is server-only; it has no client UI. Paseo plugins are trusted and unsandboxed. Review the code before installing it: this plugin is intentionally allowed to update the configured skill library.
+The plugin runs its learning pipeline on the server and adds a small client renderer for curator activity cards. Paseo plugins are trusted and unsandboxed. Review the code before installing it: this plugin is intentionally allowed to update the configured skill library.
 
 ## Configuration
 
@@ -99,6 +99,12 @@ Durable state includes cadence counters, queue claims and retries, reconciliatio
 3. At 10 accumulated iterations, it queues the completed turn for review.
 4. A background curator proposes zero or more structured skill operations.
 5. The plugin either records `nothing_to_save` or validates and atomically applies the operations.
+
+## What you see in Paseo
+
+The curator stays quiet when a review finds nothing reusable. It does not add a “no reusable lesson found” message to your timeline.
+
+When a review makes a real change, a **Curator updated skills** card appears in the source agent's timeline with the number of changes and affected skill names. If a review exhausts its retries or reaches a terminal safety failure, a **Curator review failed** card appears instead. These cards are appended only after the durable queue state has been updated; notification failure cannot change the review outcome.
 
 Use these commands while testing:
 

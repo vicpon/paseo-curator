@@ -37,6 +37,8 @@ const BUILTINS: Record<string, true> = {
 /** Provided by the Paseo daemon, not installed with the plugin. */
 const HOST_PROVIDED: Record<string, true> = {
   "@getpaseo/plugin": true,
+  "react": true,
+  "react-native": true,
 };
 
 /**

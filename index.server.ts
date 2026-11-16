@@ -39,6 +39,7 @@ import { parseFrontmatter } from "./server/skill-files";
 import type { PluginConfig } from "./server/contracts";
 import { ReconciliationRunner } from "./server/reconciliation";
 import { MaintenanceRunner } from "./server/maintenance";
+import { appendCuratorActivity } from "./server/activity";
 import {
   clearRegisteredCuratorAgentIds,
   isRegisteredCuratorAgentId,
@@ -454,6 +455,7 @@ export function createProductionRuntime(
         });
       });
     },
+    notify: (notification) => appendCuratorActivity(paseo, notification),
   });
 
   const reconciliation = new ReconciliationRunner({
@@ -511,6 +513,17 @@ export function createProductionRuntime(
     maintenanceTimer = null;
   };
 
+  const unrefTimer = (timer: unknown): void => {
+    if (
+      typeof timer === "object" &&
+      timer !== null &&
+      "unref" in timer &&
+      typeof timer.unref === "function"
+    ) {
+      timer.unref();
+    }
+  };
+
   const start = async (): Promise<void> => {
     await orchestrator.start();
     await reconciliation.runOnce().catch(() => "ran" as const);
@@ -520,12 +533,12 @@ export function createProductionRuntime(
     reconciliationTimer = setInterval(() => {
       void reconciliation.runOnce().catch(() => { /* contained */ });
     }, 5 * 60 * 1_000);
-    reconciliationTimer.unref?.();
+    unrefTimer(reconciliationTimer);
     if (config.maintenanceEnabled) {
       maintenanceTimer = setInterval(() => {
         void maintenance.runOnce().catch(() => { /* contained */ });
       }, 24 * 60 * 60 * 1_000);
-      maintenanceTimer.unref?.();
+      unrefTimer(maintenanceTimer);
     }
   };
 

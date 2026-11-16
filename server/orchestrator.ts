@@ -28,17 +28,23 @@ interface QueueStoreLike {
    * Terminalize a failed review attempt: re-queues (`pending`) while the row's
    * attempts are below the retry budget, else marks it terminal `failed` with
    * the bounded, content-free `safeError`. Terminal rows are left unchanged
-   * and reported `"failed"`.
+   * and reported `"unchanged"`.
    */
-  retryOrFail(id: string, safeError: string, claimAttempt: number): "pending" | "failed" | "stale";
+  retryOrFail(
+    id: string,
+    safeError: string,
+    claimAttempt: number,
+  ): "pending" | "failed" | "stale" | "unchanged";
   /**
    * Recover running rows whose `started_at` is older than the staleness
    * window (e.g. left behind by a crashed or restarted process): rows still
    * within the retry budget are returned to `pending`; rows at or beyond the
-   * budget are marked terminal `failed`. Returns the ids recovered to
-   * `pending`.
+   * budget are marked terminal `failed`. Returns both kinds of transition.
    */
-  recoverStaleRunning(): string[];
+  recoverStaleRunning(): {
+    recoveredIds: string[];
+    failed: Array<{ sourceAgentId: string; turnId: string }>;
+  };
 }
 
 /** The bounded timeline/curator adapter surface the orchestrator consumes. */
@@ -74,6 +80,21 @@ interface SkillManagerLike {
 /** One summary of an existing skill, for the review prompt's skill index. */
 export type { SkillSummary } from "./review-prompt";
 
+/** A user-visible terminal curator outcome. No-op reviews are intentionally omitted. */
+export type CuratorActivityNotification =
+  | {
+      outcome: "applied";
+      sourceAgentId: string;
+      turnId: string;
+      operationCount: number;
+      skillNames: string[];
+    }
+  | {
+      outcome: "failed";
+      sourceAgentId: string;
+      turnId: string;
+    };
+
 /** Dependencies injected into the orchestrator. */
 export interface CuratorOrchestratorOptions {
   /** Durable review-queue store (the `CuratorStore`). */
@@ -86,6 +107,8 @@ export interface CuratorOrchestratorOptions {
   listSkills: () => Promise<SkillSummary[]>;
   /** Detached task scheduler: the host invokes the returned task. */
   schedule: (task: () => Promise<void>) => void;
+  /** Best-effort user-visible activity sink. No-op reviews are never sent. */
+  notify?: (notification: CuratorActivityNotification) => Promise<void>;
 }
 
 /** The outcome reported by a completed-turn notification. */
@@ -131,6 +154,7 @@ export class CuratorOrchestrator {
   private readonly skillManager: SkillManagerLike;
   private readonly listSkills: () => Promise<SkillSummary[]>;
   private readonly schedule: (task: () => Promise<void>) => void;
+  private readonly notify: (notification: CuratorActivityNotification) => Promise<void>;
 
   private active: Promise<void> | null = null;
   private readonly activeHandlers = new Set<Promise<TurnHandledResult>>();
@@ -144,6 +168,7 @@ export class CuratorOrchestrator {
     this.skillManager = options.skillManager;
     this.listSkills = options.listSkills;
     this.schedule = options.schedule;
+    this.notify = options.notify ?? (async () => undefined);
   }
 
   /**
@@ -232,7 +257,14 @@ export class CuratorOrchestrator {
     if (this.shuttingDown) {
       return;
     }
-    this.store.recoverStaleRunning();
+    const recovery = this.store.recoverStaleRunning();
+    for (const failed of recovery.failed) {
+      await this.notifyBestEffort({
+        outcome: "failed",
+        sourceAgentId: failed.sourceAgentId,
+        turnId: failed.turnId,
+      });
+    }
     await this.processPending();
   }
 
@@ -299,7 +331,7 @@ export class CuratorOrchestrator {
    * otherwise `"failed"` — the caller uses this to decide whether the row
    * will be claimed again within the same drain.
    */
-  private async processRow(row: QueueRecord): Promise<"pending" | "failed" | "stale"> {
+  private async processRow(row: QueueRecord): Promise<"pending" | "failed" | "stale" | "unchanged"> {
     const agent: SourceAgent = {
       id: row.sourceAgentId,
       provider: "",
@@ -322,7 +354,16 @@ export class CuratorOrchestrator {
           operationsHash: reconciliation.operationsHash,
           skillNames: reconciliation.skillNames,
         });
-        this.store.complete(row.id, "applied", row.attempts);
+        const completed = this.store.complete(row.id, "applied", row.attempts);
+        if (completed) {
+          await this.notifyBestEffort({
+            outcome: "applied",
+            sourceAgentId: row.sourceAgentId,
+            turnId: row.turnId,
+            operationCount: reconciliation.operationCount,
+            skillNames: reconciliation.skillNames,
+          });
+        }
         return "failed";
       }
       if (reconciliation.outcome === "reconciliation_required") {
@@ -335,7 +376,14 @@ export class CuratorOrchestrator {
           skillNames: reconciliation.skillNames ?? [],
           rejectionReason: "filesystem reconciliation required",
         });
-        this.store.fail(row.id, "filesystem reconciliation required", row.attempts);
+        const failed = this.store.fail(row.id, "filesystem reconciliation required", row.attempts);
+        if (failed) {
+          await this.notifyBestEffort({
+            outcome: "failed",
+            sourceAgentId: row.sourceAgentId,
+            turnId: row.turnId,
+          });
+        }
         return "failed";
       }
 
@@ -368,14 +416,14 @@ export class CuratorOrchestrator {
       if (parsed === null) {
         // The parser records a structured, secret-safe reason; it never
         // echoes the model output.
-        return this.store.retryOrFail(row.id, "invalid curator output", row.attempts);
+        return this.retryOrFailAndNotify(row, "invalid curator output");
       }
 
       if (parsed.outcome === "nothing_to_save") {
         // A valid nothing verdict must carry no mutations; the schema does
         // not guarantee that, so verify before terminating without a batch.
         if (parsed.operations.length !== 0 || parsed.readSet.length !== 0) {
-          return this.store.retryOrFail(row.id, "invalid curator output", row.attempts);
+          return this.retryOrFailAndNotify(row, "invalid curator output");
         }
         this.store.recordAudit({
           ...context,
@@ -417,21 +465,63 @@ export class CuratorOrchestrator {
           const createdBy = operation.type === "create" ? "paseo-curator" : "unknown";
           this.store.recordSkillActivity(operation.skillName, createdBy, activity);
         }
-        this.store.complete(row.id, "applied", row.attempts);
+        const completed = this.store.complete(row.id, "applied", row.attempts);
+        if (completed) {
+          await this.notifyBestEffort({
+            outcome: "applied",
+            sourceAgentId: row.sourceAgentId,
+            turnId: row.turnId,
+            operationCount: parsed.operations.length,
+            skillNames: [...new Set(parsed.operations.map((operation) => operation.skillName))],
+          });
+        }
       } else if (applyResult.outcome === "rollback_failed") {
-        this.store.fail(row.id, "rollback failed; reconciliation required", row.attempts);
+        const failed = this.store.fail(
+          row.id,
+          "rollback failed; reconciliation required",
+          row.attempts,
+        );
+        if (failed) {
+          await this.notifyBestEffort({
+            outcome: "failed",
+            sourceAgentId: row.sourceAgentId,
+            turnId: row.turnId,
+          });
+        }
       } else {
-        this.store.retryOrFail(row.id, "apply outcome not applied", row.attempts);
+        await this.retryOrFailAndNotify(row, "apply outcome not applied");
       }
       return "failed";
     } catch (err) {
       // Bounded and content-free: only the identity and a safe category.
       // Never a transcript or model output fragment.
-      return this.store.retryOrFail(
-        row.id,
+      return this.retryOrFailAndNotify(
+        row,
         boundedFailure(row.sourceAgentId, row.turnId, err),
-        row.attempts,
       );
+    }
+  }
+
+  private async retryOrFailAndNotify(
+    row: QueueRecord,
+    safeError: string,
+  ): Promise<"pending" | "failed" | "stale" | "unchanged"> {
+    const result = this.store.retryOrFail(row.id, safeError, row.attempts);
+    if (result === "failed") {
+      await this.notifyBestEffort({
+        outcome: "failed",
+        sourceAgentId: row.sourceAgentId,
+        turnId: row.turnId,
+      });
+    }
+    return result;
+  }
+
+  private async notifyBestEffort(notification: CuratorActivityNotification): Promise<void> {
+    try {
+      await this.notify(notification);
+    } catch {
+      // Timeline visibility must never change the durable review outcome.
     }
   }
 }

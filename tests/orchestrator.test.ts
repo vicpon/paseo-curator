@@ -4,7 +4,10 @@ import { CuratorStore, type StoreConfig } from "../server/store";
 import type { SourceAgent, WholeTurnRead, CuratorRunResult } from "../server/paseo-adapter";
 import type { SkillOperation } from "../server/contracts";
 import { sha256 } from "../server/skill-files";
-import { CuratorOrchestrator } from "../server/orchestrator";
+import {
+  CuratorOrchestrator,
+  type CuratorActivityNotification,
+} from "../server/orchestrator";
 
 // ---------------------------------------------------------------------------
 // Fixture literals (hand-derived, parser-compatible, with readSet)
@@ -310,6 +313,7 @@ interface Env {
   adapter: FakeAdapter;
   manager: FakeManager;
   scheduler: CapturedScheduler;
+  notifications: CuratorActivityNotification[];
   orch: CuratorOrchestrator;
 }
 
@@ -322,14 +326,18 @@ function setup(storeConfig: Partial<StoreConfig> = {}): Env {
   const adapter = new FakeAdapter();
   const manager = new FakeManager();
   const scheduler = new CapturedScheduler();
+  const notifications: CuratorActivityNotification[] = [];
   const orch = new CuratorOrchestrator({
     store,
     adapter,
     skillManager: manager,
     listSkills: async () => [],
     schedule: (t: unknown) => scheduler.schedule(t),
+    notify: async (notification) => {
+      notifications.push(notification);
+    },
   });
-  return { store, adapter, manager, scheduler, orch };
+  return { store, adapter, manager, scheduler, notifications, orch };
 }
 
 function teardown(env: Env): void {
@@ -577,6 +585,15 @@ describe("CuratorOrchestrator", () => {
           patchCount: 1,
           state: "active",
         })]);
+        expect(env.notifications).toEqual([
+          {
+            outcome: "applied",
+            sourceAgentId: "agent-D",
+            turnId: "turn-4",
+            operationCount: 1,
+            skillNames: ["git-hygiene"],
+          },
+        ]);
       } finally {
         teardown(env);
       }
@@ -620,6 +637,7 @@ describe("CuratorOrchestrator", () => {
           env.adapter.runCuratorCalls.filter((c) => c.agent.id === "agent-E" && c.turnId === turnId),
         ).toHaveLength(1);
         expect(env.store.get("agent-E", turnId)!.status).toBe("nothing_to_save");
+        expect(env.notifications).toEqual([]);
       } finally {
         teardown(env);
       }
@@ -779,6 +797,55 @@ describe("CuratorOrchestrator", () => {
     },
   );
 
+  it("start() surfaces a stale running row that recovery terminal-fails", async () => {
+    let now = Date.parse("2100-01-01T00:00:00.000Z");
+    const env = setup({
+      now: () => new Date(now),
+      staleAfterMs: 0,
+      maxRetries: 1,
+    });
+    try {
+      env.store.enqueue("agent-recovery-failed", "turn-recovery-failed");
+      expect(env.store.claimNext()?.attempts).toBe(1);
+      now += 1;
+
+      await env.orch.start();
+
+      expect(env.store.get("agent-recovery-failed", "turn-recovery-failed")?.status).toBe("failed");
+      expect(env.notifications).toEqual([
+        {
+          outcome: "failed",
+          sourceAgentId: "agent-recovery-failed",
+          turnId: "turn-recovery-failed",
+        },
+      ]);
+    } finally {
+      teardown(env);
+    }
+  });
+
+  it("does not notify when a fenced applied transition loses its claim", async () => {
+    const env = setup();
+    try {
+      const agentId = "agent-stale-applied";
+      const turnId = "turn-stale-applied";
+      env.adapter.addRead(
+        agentId,
+        turnId,
+        makeRead(agentId, turnId, [{ role: "user", content: "extract workflow" }], 10),
+      );
+      env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+      env.store.enqueue(agentId, turnId);
+      env.store.complete = () => false;
+
+      await env.orch.processPending();
+
+      expect(env.notifications).toEqual([]);
+    } finally {
+      teardown(env);
+    }
+  });
+
   // -------------------------------------------------------------------------
   // shutdown(): waits for the active run, then blocks later scheduling
   // -------------------------------------------------------------------------
@@ -932,6 +999,35 @@ describe("CuratorOrchestrator", () => {
         expect(rec.error).not.toContain("I think maybe I should save this");
         // And it must remain bounded.
         expect(rec.error.length).toBeLessThanOrEqual(500);
+        expect(env.notifications).toEqual([
+          {
+            outcome: "failed",
+            sourceAgentId: agentId,
+            turnId,
+          },
+        ]);
+      } finally {
+        teardown(env);
+      }
+    });
+
+    it("does not notify when retry terminalization finds an already-transitioned claim", async () => {
+      const env = setup();
+      try {
+        const agentId = "agent-stale-failure";
+        const turnId = "turn-stale-failure";
+        env.adapter.addRead(
+          agentId,
+          turnId,
+          makeRead(agentId, turnId, [{ role: "user", content: "extract workflow" }], 10),
+        );
+        env.adapter.setFinalText(agentId, turnId, "not json");
+        env.store.enqueue(agentId, turnId);
+        env.store.retryOrFail = () => "unchanged";
+
+        await env.orch.processPending();
+
+        expect(env.notifications).toEqual([]);
       } finally {
         teardown(env);
       }

@@ -347,7 +347,7 @@ describe("CuratorStore", () => {
       expect(oldClaim.attempts).toBe(1);
 
       clock.advance(2);
-      expect(store.recoverStaleRunning()).toEqual([queued.id]);
+      expect(store.recoverStaleRunning()).toEqual({ recoveredIds: [queued.id], failed: [] });
       const newClaim = store.claimNext()!;
       expect(newClaim.attempts).toBe(2);
 
@@ -399,7 +399,7 @@ describe("CuratorStore", () => {
       store.complete(b.id, "nothing_to_save", b.attempts);
       // Recovery must not touch terminal rows.
       const recovered = store.recoverStaleRunning();
-      expect(recovered).toHaveLength(0);
+      expect(recovered).toEqual({ recoveredIds: [], failed: [] });
       expect(store.get("agent-1", "turn-a")?.status).toBe("applied");
       expect(store.get("agent-1", "turn-b")?.status).toBe("nothing_to_save");
       store.close();
@@ -429,7 +429,7 @@ describe("CuratorStore", () => {
       // Advance the clock beyond the staleness window so the row is stale.
       clock.advance(STALE_AFTER_MS + 1);
       const recovered = store.recoverStaleRunning();
-      expect(recovered).toContain(running.id);
+      expect(recovered).toEqual({ recoveredIds: [running.id], failed: [] });
       // Recovered rows are back to pending so a fresh claim can pick them up.
       expect(store.get("agent-1", "turn-1")?.status).toBe("pending");
       // attempts is preserved (not reset) so the retry budget is tracked.
@@ -446,7 +446,7 @@ describe("CuratorStore", () => {
       // Advance the clock just short of the staleness window.
       clock.advance(STALE_AFTER_MS - 1);
       const recovered = store.recoverStaleRunning();
-      expect(recovered).toHaveLength(0);
+      expect(recovered).toEqual({ recoveredIds: [], failed: [] });
       // The row is still running (not stale, not recovered).
       expect(store.get("agent-1", "turn-1")?.status).toBe("running");
       expect(store.get("agent-1", "turn-1")?.attempts).toBe(1);
@@ -471,7 +471,8 @@ describe("CuratorStore", () => {
         const store = new CuratorStore(dbPath, clockConfig(clock, STALE_AFTER_MS));
         // Recovery must detect the stale running row via started_at — no test hook.
         const recovered = store.recoverStaleRunning();
-        expect(recovered.length).toBe(1);
+        expect(recovered.recoveredIds).toHaveLength(1);
+        expect(recovered.failed).toEqual([]);
         // The row is back to pending and can be re-claimed.
         expect(store.get("agent-1", "turn-1")?.status).toBe("pending");
         expect(store.get("agent-1", "turn-1")?.attempts).toBe(1);
@@ -498,7 +499,10 @@ describe("CuratorStore", () => {
       clock.advance(STALE_AFTER_MS + 1);
       // Recovery: attempts == maxRetries -> terminal failed, NOT re-queued.
       const recovered = store.recoverStaleRunning();
-      expect(recovered).toHaveLength(0);
+      expect(recovered).toEqual({
+        recoveredIds: [],
+        failed: [{ sourceAgentId: "agent-1", turnId: "turn-1" }],
+      });
       const rec = store.get("agent-1", "turn-1");
       expect(rec?.status).toBe("failed");
       expect(rec?.error).toBe("exceeded maxRetries");
@@ -537,7 +541,7 @@ describe("CuratorStore", () => {
       expect(failed?.error).toBe("curator failed for agent \"agent-1\" turn \"turn-1\": Error");
       expect(failed?.completedAt).toBeDefined();
       // Terminal: no further requeue and no further claim.
-      expect(store.retryOrFail(failed!.id, "again", failed!.attempts)).toBe("failed");
+      expect(store.retryOrFail(failed!.id, "again", failed!.attempts)).toBe("unchanged");
       expect(store.claimNext()).toBeNull();
       store.close();
     });
@@ -551,8 +555,8 @@ describe("CuratorStore", () => {
       const b = store.claimNext()!;
       store.complete(b.id, "nothing_to_save", b.attempts);
 
-      expect(store.retryOrFail(a.id, "boom", a.attempts)).toBe("failed");
-      expect(store.retryOrFail(b.id, "boom", b.attempts)).toBe("failed");
+      expect(store.retryOrFail(a.id, "boom", a.attempts)).toBe("unchanged");
+      expect(store.retryOrFail(b.id, "boom", b.attempts)).toBe("unchanged");
 
       const ra = store.get("agent-1", "turn-a");
       const rb = store.get("agent-1", "turn-b");

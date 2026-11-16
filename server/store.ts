@@ -33,6 +33,11 @@ export interface StoreConfig {
   staleAfterMs: number;
 }
 
+export interface StaleRecoveryResult {
+  recoveredIds: string[];
+  failed: Array<{ sourceAgentId: string; turnId: string }>;
+}
+
 /**
  * An internal row shape as stored in SQLite (before schema validation).
  */
@@ -516,7 +521,7 @@ export class CuratorStore {
    * The decision and write are transactional, so the attempt count is
    * consistent with the state transition. Rows already terminal
    * (`applied`, `nothing_to_save`, `failed`) — or `pending` — are never
-   * touched (never re-queued, never failed) and are reported `"failed"`.
+   * touched (never re-queued, never failed) and are reported `"unchanged"`.
    *
    * `attempts` (set by the claim) is preserved on the re-queue path so the
    * retry budget is tracked across retries.
@@ -525,10 +530,14 @@ export class CuratorStore {
    * @param safeError bounded, content-free failure reason for the terminal
    *                  `failed` state
    * @returns the row's status after the operation: `"pending"` when the row
-   *          was re-queued for retry, `"failed"` when it is (or already was)
-   *          terminal failed.
+   *          was re-queued for retry, `"failed"` when this call terminalizes
+   *          it, and `"unchanged"` when another transition already won.
    */
-  retryOrFail(id: string, safeError: string, claimAttempt: number): "pending" | "failed" | "stale" {
+  retryOrFail(
+    id: string,
+    safeError: string,
+    claimAttempt: number,
+  ): "pending" | "failed" | "stale" | "unchanged" {
     return this.tx(() => {
       const row = this.db
         .prepare("SELECT status, attempts FROM queue WHERE id = ?")
@@ -536,8 +545,7 @@ export class CuratorStore {
       if (row === undefined || row.status !== "running") {
         // Terminal rows (applied, nothing_to_save, failed) and rows that are
         // never running (pending) remain unchanged. The contract reports
-        // `"failed"` for everything that was not re-queued.
-        return "failed";
+        return "unchanged";
       }
       if (row.attempts !== claimAttempt) {
         return "stale";
@@ -581,9 +589,9 @@ export class CuratorStore {
    * injected clock — no external flag is needed. This means recovery works
    * after a process restart without any test-only call.
    *
-   * @returns the ids of the rows that were recovered (transitioned to pending).
+   * @returns rows requeued and rows newly terminal-failed by this recovery pass.
    */
-  recoverStaleRunning(): string[] {
+  recoverStaleRunning(): StaleRecoveryResult {
     return this.tx(() => {
       // A row is stale if started_at is not null and is <= the cutoff
       // (an ISO-8601 string comparison works because all timestamps share the same format).
@@ -594,6 +602,7 @@ export class CuratorStore {
         )
         .all(cutoff) as unknown as QueueRow[];
       const recovered: string[] = [];
+      const failed: StaleRecoveryResult["failed"] = [];
       const now = this.now().toISOString();
       for (const row of stale) {
         if (row.attempts < this.maxRetries) {
@@ -613,9 +622,10 @@ export class CuratorStore {
                WHERE id = ?`,
             )
             .run(now, now, "exceeded maxRetries", row.id);
+          failed.push({ sourceAgentId: row.source_agent_id, turnId: row.turn_id });
         }
       }
-      return recovered;
+      return { recoveredIds: recovered, failed };
     });
   }
 
