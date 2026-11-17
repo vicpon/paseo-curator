@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { CuratorRunError, type SourceAgent, type WholeTurnRead } from "./paseo-adapter";
+import {
+  CuratorRunError,
+  TurnReadError,
+  type SourceAgent,
+  type WholeTurnRead,
+} from "./paseo-adapter";
 import type { SkillSummary } from "./review-prompt";
 import { buildReviewPrompt } from "./review-prompt";
 import { parseReviewResult, type ReadSetEntry } from "./review-parser";
@@ -529,16 +534,17 @@ export class CuratorOrchestrator {
 
 /**
  * Build a bounded, content-free failure string: the source identity plus a
- * safe category. For a {@link CuratorRunError} the safe category is carried
- * in the message itself (identity + `create-failed`/`wait-failed`/terminal
- * status/`source-model-unavailable` — never transcript, prompt, or model
- * output), so it is preserved for diagnosis. Every other thrown value
- * contributes only its error class name; its message may echo untrusted
- * content and is intentionally dropped.
+ * safe category. For {@link CuratorRunError} and {@link TurnReadError} the
+ * safe category is carried in the message itself (identity + a bounded
+ * category such as `create-failed`, `timeline gap`, or a capped daemon
+ * payload error — never transcript, prompt, or model output), so it is
+ * preserved for diagnosis. Every other thrown value contributes only its
+ * error class name; its message may echo untrusted content and is
+ * intentionally dropped.
  */
 function boundedFailure(sourceAgentId: string, turnId: string, err: unknown): string {
   const category =
-    err instanceof CuratorRunError
+    err instanceof CuratorRunError || err instanceof TurnReadError
       ? err.message
       : err instanceof Error && err.name !== ""
         ? err.name
