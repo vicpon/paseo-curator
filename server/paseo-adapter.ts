@@ -25,6 +25,7 @@ export interface PaseoApiRef {
         readonly agent: {
           readonly id: string;
           readonly provider: string;
+          readonly model?: string | null;
           readonly cwd: string;
           readonly status: "idle" | "running" | "error" | "closed" | "initializing";
           readonly updatedAt: string;
@@ -53,6 +54,14 @@ export interface SourceAgent {
   readonly id: string;
   readonly provider: string;
   readonly cwd: string;
+  /**
+   * The source agent's model id (e.g. `ai3/qwen/qwen3.8-27b`), when known.
+   * Optional: the lifecycle hook payload does not carry it. The daemon
+   * snapshot (timeline refetch or agent listing) is authoritative and the
+   * orchestrator always re-reads the turn before running the curator, so the
+   * curator path normally has it.
+   */
+  readonly model?: string | null;
 }
 
 /**
@@ -81,6 +90,7 @@ export interface RefetchResult {
   readonly agent?: {
     readonly id: string;
     readonly provider: string;
+    readonly model?: string | null;
     readonly cwd: string;
     readonly metadata?: Readonly<Record<string, unknown>>;
   } | null;
@@ -147,6 +157,7 @@ export interface WholeTurnRead {
   readonly sourceAgentId: string;
   readonly turnId: string;
   readonly provider: string;
+  readonly model: string | null;
   readonly cwd: string;
   readonly entries: TimelineEntry[];
   readonly toolIterations: number;
@@ -270,6 +281,7 @@ export class PaseoAdapter {
       agent: {
         id: string;
         provider: string;
+        model?: string | null;
         cwd: string;
         status: "idle" | "running" | "error" | "closed" | "initializing";
         updatedAt: string;
@@ -309,6 +321,7 @@ export class PaseoAdapter {
         id: candidate.agent.id,
         provider: page.agent?.provider ?? candidate.agent.provider,
         cwd: page.agent?.cwd ?? candidate.agent.cwd,
+        model: page.agent?.model ?? candidate.agent.model ?? null,
       };
       const seen = new Set<string>();
       for (const entry of page.entries) {
@@ -345,6 +358,7 @@ export class PaseoAdapter {
     // and turn, so those caller fields are often empty placeholders.
     let authoritativeProvider: string | null = null;
     let authoritativeCwd: string | null = null;
+    let authoritativeModel: string | null = null;
 
     for (;;) {
       const options: RefetchOptions =
@@ -396,6 +410,7 @@ export class PaseoAdapter {
         }
         authoritativeProvider = pageAgent.provider;
         authoritativeCwd = pageAgent.cwd;
+        authoritativeModel = pageAgent.model ?? null;
       }
 
       const firstTargetIndex = page.entries.findIndex((entry) => entry.turnId === turnId);
@@ -426,13 +441,13 @@ export class PaseoAdapter {
       const turnComplete = sawTurnEntry && (sawOlderBoundary || !page.hasOlder);
       if (turnComplete) {
         const inTurn = collected.filter((entry) => entry.turnId === turnId);
-        return this.finish(sourceAgent, turnId, inTurn, authoritativeProvider, authoritativeCwd);
+        return this.finish(sourceAgent, turnId, inTurn, authoritativeProvider, authoritativeCwd, authoritativeModel);
       }
 
       if (page.startCursor === null) {
         if (sawTurnEntry) {
           const inTurn = collected.filter((entry) => entry.turnId === turnId);
-          return this.finish(sourceAgent, turnId, inTurn, authoritativeProvider, authoritativeCwd);
+          return this.finish(sourceAgent, turnId, inTurn, authoritativeProvider, authoritativeCwd, authoritativeModel);
         }
         throw boundedError(
           sourceAgent.id,
@@ -490,11 +505,29 @@ export class PaseoAdapter {
     };
 
     const unregisterCurator = registerCuratorAgentId(agentId);
+
+    // The client SDK requires `config.provider` in `provider/model` form (it
+    // splits on the first slash), while daemon snapshots carry the bare
+    // provider id and the model separately. Compose the selection: a provider
+    // that already includes a slash passes through; otherwise the snapshot's
+    // model is appended. With neither form available the run cannot specify a
+    // route, so it fails with a bounded category instead of a create call
+    // that is guaranteed to be rejected.
+    let providerSelection = sourceAgent.provider.trim();
+    if (!providerSelection.includes("/")) {
+      const model = sourceAgent.model?.trim() ?? "";
+      if (model.length === 0) {
+        unregisterCurator();
+        throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
+      }
+      providerSelection = `${providerSelection}/${model}`;
+    }
+
     let handle: AgentHandle;
     try {
       handle = await this.paseo.agents.create({
         agentId,
-        config: { provider: sourceAgent.provider, modeId: "ask" },
+        config: { provider: providerSelection, modeId: "ask" },
         cwd: sourceAgent.cwd,
         parent: sourceAgent.id,
         prompt,
@@ -536,6 +569,7 @@ export class PaseoAdapter {
     inTurn: TimelineEntryPayload[],
     authoritativeProvider: string | null,
     authoritativeCwd: string | null,
+    authoritativeModel: string | null,
   ): WholeTurnRead {
     // The daemon payload's agent snapshot is authoritative for the provider
     // and cwd; it wins over the caller-supplied fields (which may be empty
@@ -543,6 +577,7 @@ export class PaseoAdapter {
     // the caller — a snapshot for a different agent already failed the read.
     const provider = authoritativeProvider ?? sourceAgent.provider;
     const cwd = authoritativeCwd ?? sourceAgent.cwd;
+    const model = authoritativeModel ?? sourceAgent.model ?? null;
 
     const entries: TimelineEntry[] = [];
     const callIds = new Set<string>();
@@ -570,6 +605,7 @@ export class PaseoAdapter {
       sourceAgentId: sourceAgent.id,
       turnId,
       provider,
+      model,
       cwd,
       entries,
       toolIterations: callIds.size,

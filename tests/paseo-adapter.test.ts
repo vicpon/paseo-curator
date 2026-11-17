@@ -37,6 +37,7 @@ interface FakeRefetchResult {
 interface FakeAgentSnapshot {
   id: string;
   provider: string;
+  model?: string | null;
   cwd: string;
   status: "idle" | "running" | "closed";
   createdAt: string;
@@ -157,9 +158,14 @@ const entry = (
   };
 };
 
-const snapshot = (provider = AGENT_PROVIDER, cwd = AGENT_CWD): FakeAgentSnapshot => ({
+const snapshot = (
+  provider = AGENT_PROVIDER,
+  cwd = AGENT_CWD,
+  model: string | null = null,
+): FakeAgentSnapshot => ({
   id: AGENT_ID,
   provider,
+  model,
   cwd,
   status: "idle",
   createdAt: "2026-11-15T00:00:00.000Z",
@@ -647,7 +653,12 @@ describe("discoverRecentCompletedTurns", () => {
     const result = await new PaseoAdapter(paseo as never).discoverRecentCompletedTurns(null, 10);
 
     expect(result.turns.map((item) => item.turnId)).toEqual(["turn-1", "turn-2"]);
-    expect(result.turns[0]?.agent).toEqual({ id: AGENT_ID, provider: AGENT_PROVIDER, cwd: AGENT_CWD });
+    expect(result.turns[0]?.agent).toEqual({
+      id: AGENT_ID,
+      provider: AGENT_PROVIDER,
+      cwd: AGENT_CWD,
+      model: null,
+    });
     expect(result.cursor).toBe("2040-01-02T00:00:00.000Z|agent-001");
   });
 
@@ -956,5 +967,53 @@ describe("runCurator", () => {
     const promise = adapter.runCurator(snapshot(), "turn-002", PROMPT);
     await expect(promise).rejects.toThrow(/agent "agent-001" turn "turn-002"/);
     await expect(promise).rejects.not.toThrow(PROMPT);
+  });
+
+  it("composes a bare snapshot provider and its model into the provider/model selection", async () => {
+    const { paseo, createCalls } = makeFakeCreate({
+      kind: "ok",
+      agentId: CURATOR_AGENT_ID,
+      waitResult: idleWaitResult("ok"),
+    });
+
+    const adapter = new PaseoAdapter(paseo);
+    // Daemon snapshots carry the bare provider id and the model separately;
+    // the client SDK requires the combined `provider/model` form.
+    await adapter.runCurator(
+      { ...snapshot("omp", AGENT_CWD, "ai3/qwen/qwen3.8-27b") },
+      "turn-002",
+      PROMPT,
+    );
+    expect(createCalls[0]!.config.provider).toBe("omp/ai3/qwen/qwen3.8-27b");
+  });
+
+  it("passes a provider that already contains a slash through unchanged", async () => {
+    const { paseo, createCalls } = makeFakeCreate({
+      kind: "ok",
+      agentId: CURATOR_AGENT_ID,
+      waitResult: idleWaitResult("ok"),
+    });
+
+    const adapter = new PaseoAdapter(paseo);
+    await adapter.runCurator(snapshot(), "turn-002", PROMPT);
+    expect(createCalls[0]!.config.provider).toBe(AGENT_PROVIDER);
+  });
+
+  it("rejects a bare provider with no model as source-model-unavailable before any create", async () => {
+    const { paseo, createCalls } = makeFakeCreate({
+      kind: "ok",
+      agentId: CURATOR_AGENT_ID,
+      waitResult: idleWaitResult("ok"),
+    });
+
+    const adapter = new PaseoAdapter(paseo);
+    const promise = adapter.runCurator(
+      { ...snapshot("omp"), model: null },
+      "turn-002",
+      PROMPT,
+    );
+    await expect(promise).rejects.toThrow(/source-model-unavailable/);
+    await expect(promise).rejects.not.toThrow(PROMPT);
+    expect(createCalls).toHaveLength(0);
   });
 });

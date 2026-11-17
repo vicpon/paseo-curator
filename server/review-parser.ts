@@ -60,17 +60,40 @@ const parsedDocSchema = z
 // ---------------------------------------------------------------------------
 
 /**
+ * True when `text` (the prose outside the single fenced block) contains a
+ * complete, balanced top-level JSON object. Such text is a second candidate
+ * document, not chatter — the response is ambiguous and must be rejected.
+ */
+function containsCompleteJsonObject(text: string): boolean {
+  for (let i = text.indexOf("{"); i !== -1; i = text.indexOf("{", i + 1)) {
+    const candidate = text.slice(i);
+    const r = verifySingleObject(candidate);
+    if (r.ok === "object" || r.ok === "non-object") {
+      // A structurally-complete value starts at this "{". Only a complete
+      // object counts as a second document; a non-object value (e.g. an
+      // array in prose) is chatter, not a rival review document.
+      if (r.ok === "object") return true;
+      return false;
+    }
+    // parse-error / trailing: try the next "{".
+  }
+  return false;
+}
+
+/**
  * Extract the single JSON document from the raw model output.
  *
  * Accepts exactly one of:
  *  - a plain JSON object: the entire trimmed response is a JSON object, with
  *    nothing (other than whitespace) before or after it.
- *  - a fenced JSON object: the entire trimmed response is a single `json`
- *    fenced code block (case-insensitive tag) containing one JSON object,
- *    with only whitespace outside the fences.
+ *  - a fenced JSON object: exactly one `json` fenced code block
+ *    (case-insensitive tag) containing one JSON object. Surrounding prose is
+ *    tolerated as model chatter, provided the prose does not itself contain
+ *    a complete JSON object (which would make the document ambiguous) or
+ *    another fence.
  *
- * Rejects (returns null): prose anywhere around the document, more than one
- * document or fence, a fenced block with any non-JSON language tag, and any
+ * Rejects (returns null): more than one fence, prose containing a complete
+ * second JSON object, a fenced block with any non-JSON language tag, and any
  * non-object JSON value.
  *
  * @returns the raw JSON document string, or null if the response does not
@@ -108,15 +131,19 @@ function extractJsonDocument(rawInput: string): string | null {
   }
 
   if (fences.length > 0) {
-    // Any fence present: the response must be exactly one fenced block, with
-    // whitespace-only outside it.
+    // Any fence present: the response must contain exactly one fenced block.
+    // Surrounding prose is tolerated as model chatter (e.g. a sentence before
+    // the document); it is never treated as content. Prose that itself
+    // contains a ``` fence makes the block count differ from one → reject.
     if (fences.length !== 1) return null;
     const f = fences[0];
     if (f.tag.toLowerCase() !== "json") return null;
+    // Prose outside the block must not contain a complete rival JSON object.
     const before = text.slice(0, f.start);
     const after = text.slice(f.close + 3);
-    if (before.trim().length !== 0) return null;
-    if (after.trim().length !== 0) return null;
+    if (containsCompleteJsonObject(before) || containsCompleteJsonObject(after)) {
+      return null;
+    }
     const body = text.slice(f.bodyStart, f.close);
     if (body.trim().length === 0) return null;
     const r = verifySingleObject(body);
@@ -208,10 +235,11 @@ function findObjectEnd(s: string): number {
 /**
  * Parse a curator agent's raw review output into a validated `ReviewResult`.
  *
- * Accepts exactly one plain JSON object, or one fenced `json` object, with no
- * surrounding prose or second document. Validates against
- * `ReviewResultSchema` (Task 1) plus read-set hash self-consistency, and
- * returns a structured `ParsedReviewResult` with the readSet verified.
+ * Accepts exactly one plain JSON object, or exactly one fenced `json` object
+ * with prose chatter around it (as long as the prose contains no complete
+ * second JSON object). Validates against `ReviewResultSchema` (Task 1) plus
+ * read-set hash self-consistency, and returns a structured
+ * `ParsedReviewResult` with the readSet verified.
  *
  * @param raw the raw model output string.
  * @returns the validated result, or `null` if the response is ambiguous,

@@ -214,13 +214,18 @@ describe("trailing payload rejection", () => {
     expect(r).toBeNull();
   });
 
-  it("rejects when non-whitespace characters follow a fenced JSON block", () => {
+  it("tolerates prose chatter after a fenced JSON block", () => {
     const r = parseReviewResult(`\`\`\`json\n${raw(doc({}))}\n\`\`\`\ntrailing garbage`);
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
   });
 
-  it("rejects when non-whitespace characters precede a fenced JSON block", () => {
+  it("tolerates prose chatter before a fenced JSON block", () => {
     const r = parseReviewResult(`intro text\n\`\`\`json\n${raw(doc({}))}\n\`\`\``);
+    expect(r).not.toBeNull();
+  });
+
+  it("rejects prose that contains a complete second JSON object before the fence", () => {
+    const r = parseReviewResult(`${raw(doc({ summary: "Rival." }))}\n\`\`\`json\n${raw(doc({}))}\n\`\`\``);
     expect(r).toBeNull();
   });
 

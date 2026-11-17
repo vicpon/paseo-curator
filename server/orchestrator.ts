@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { SourceAgent, WholeTurnRead } from "./paseo-adapter";
+import { CuratorRunError, type SourceAgent, type WholeTurnRead } from "./paseo-adapter";
 import type { SkillSummary } from "./review-prompt";
 import { buildReviewPrompt } from "./review-prompt";
 import { parseReviewResult, type ReadSetEntry } from "./review-parser";
@@ -398,6 +398,7 @@ export class CuratorOrchestrator {
         id: read.sourceAgentId,
         provider: read.provider,
         cwd: read.cwd,
+        model: read.model,
       };
 
       // Build the review prompt from the exact turn and the current library.
@@ -528,12 +529,20 @@ export class CuratorOrchestrator {
 
 /**
  * Build a bounded, content-free failure string: the source identity plus a
- * safe category. The thrown value's own message is intentionally NOT
- * included — it may echo transcript or model content.
+ * safe category. For a {@link CuratorRunError} the safe category is carried
+ * in the message itself (identity + `create-failed`/`wait-failed`/terminal
+ * status/`source-model-unavailable` — never transcript, prompt, or model
+ * output), so it is preserved for diagnosis. Every other thrown value
+ * contributes only its error class name; its message may echo untrusted
+ * content and is intentionally dropped.
  */
 function boundedFailure(sourceAgentId: string, turnId: string, err: unknown): string {
   const category =
-    err instanceof Error && err.name !== "" ? err.name : "unexpected-error";
+    err instanceof CuratorRunError
+      ? err.message
+      : err instanceof Error && err.name !== ""
+        ? err.name
+        : "unexpected-error";
   return `curator failed for agent "${sourceAgentId}" turn "${turnId}": ${category}`.slice(
     0,
     500,

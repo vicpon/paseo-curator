@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { CuratorStore, type StoreConfig } from "../server/store";
-import type { SourceAgent, WholeTurnRead, CuratorRunResult } from "../server/paseo-adapter";
+import { CuratorRunError, type SourceAgent, type WholeTurnRead, type CuratorRunResult } from "../server/paseo-adapter";
 import type { SkillOperation } from "../server/contracts";
 import { sha256 } from "../server/skill-files";
 import {
@@ -64,6 +64,7 @@ function makeRead(
     sourceAgentId: agentId,
     turnId,
     provider: "test-provider",
+    model: null,
     cwd: "/tmp/curator-work",
     entries,
     toolIterations,
@@ -716,6 +717,7 @@ describe("CuratorOrchestrator", () => {
           sourceAgentId: agentId,
           turnId,
           provider: "re-read-provider",
+          model: "re-read-model",
           cwd: "/re-read/actual-cwd",
           entries: [{ role: "user", content: "do a thing" }],
           toolIterations: 10,
@@ -738,6 +740,7 @@ describe("CuratorOrchestrator", () => {
         expect(call!.agent.id).toBe(agentId);
         expect(call!.agent.provider).toBe("re-read-provider");
         expect(call!.agent.cwd).toBe("/re-read/actual-cwd");
+        expect(call!.agent.model).toBe("re-read-model");
         expect(call!.agent.provider).not.toBe("");
         expect(call!.agent.cwd).not.toBe("");
       } finally {
@@ -1215,5 +1218,39 @@ describe("CuratorOrchestrator", () => {
         }
       },
     );
+
+    it("a CuratorRunError's safe category is preserved in the stored error for diagnosis", async () => {
+      const env = setup();
+      try {
+        const agentId = "agent-runerror";
+        const turnId = "turn-runerror";
+        env.adapter.addRead(
+          agentId,
+          turnId,
+          makeRead(agentId, turnId, [{ role: "user", content: "do a thing" }], 10),
+        );
+        // CuratorRunError messages are built only from identity + a safe
+        // category, so they are persisted whole (unlike arbitrary errors,
+        // whose messages may echo untrusted content and are dropped).
+        env.adapter.setCuratorThrow(
+          agentId,
+          turnId,
+          new CuratorRunError(
+            `runCurator failed for agent "${agentId}" turn "${turnId}": create-failed`,
+          ),
+        );
+
+        env.store.enqueue(agentId, turnId);
+        await env.orch.processPending();
+
+        const rec = env.store.get(agentId, turnId);
+        expect(rec?.status).toBe("failed");
+        expect(rec?.attempts).toBe(3);
+        expect(rec?.error).toContain("create-failed");
+        expect(rec?.error?.length).toBeLessThanOrEqual(500);
+      } finally {
+        teardown(env);
+      }
+    });
   });
 });
