@@ -79,7 +79,10 @@ interface SkillManagerLike {
       turnId: string;
       claimIsCurrent?: () => boolean;
     },
-  ): Promise<{ outcome: "applied" | "rejected" | "rolled_back" | "rollback_failed" }>;
+  ): Promise<
+    { outcome: "applied" | "rejected" | "rolled_back" | "rollback_failed" }
+      & { rejectionReason?: string }
+  >;
 }
 
 /** One summary of an existing skill, for the review prompt's skill index. */
@@ -462,7 +465,13 @@ export class CuratorOrchestrator {
         operationCount: parsed.operations.length,
         operationsHash: hashOperations(parsed.operations),
         skillNames: parsed.operations.map((operation) => operation.skillName),
-        ...(applied ? {} : { rejectionReason: `apply outcome: ${applyResult.outcome}` }),
+        ...(applied
+          ? {}
+          : {
+              rejectionReason: `apply outcome: ${applyResult.outcome}${
+                applyResult.rejectionReason ? `: ${applyResult.rejectionReason}` : ""
+              }`.slice(0, 300),
+            }),
       });
 
       if (applyResult.outcome === "applied") {
@@ -495,7 +504,12 @@ export class CuratorOrchestrator {
           });
         }
       } else {
-        await this.retryOrFailAndNotify(row, "apply outcome not applied");
+        // Carry the manager's structured, secret-safe reason into the queue
+        // row so failures are diagnosable without forensic reproduction.
+        await this.retryOrFailAndNotify(
+          row,
+          `apply not applied: ${applyResult.rejectionReason ?? applyResult.outcome}`.slice(0, 300),
+        );
       }
       return "failed";
     } catch (err) {

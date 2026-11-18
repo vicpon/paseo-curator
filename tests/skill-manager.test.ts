@@ -186,7 +186,7 @@ describe("SkillManager.applyBatch", () => {
       expect(skillDirExists(root, "epsilon")).toBe(false);
     });
 
-    it("rejects create when created_by is missing", async () => {
+    it("stamps curator provenance on create when created_by is missing", async () => {
       const root = newRoot("create-no-created-by");
       const mgr = new SkillManager(root);
       const result = await mgr.applyBatch(
@@ -194,7 +194,29 @@ describe("SkillManager.applyBatch", () => {
         [],
         ctx,
       );
-      expect(result.outcome).toBe("rejected");
+      expect(result.outcome).toBe("applied");
+      // Provenance is plugin-controlled: the written file always carries it,
+      // regardless of what the curator model supplied.
+      expect(readSkillMd(root, "zeta")).toContain("created_by: paseo-curator");
+    });
+
+    it("overrides a foreign created_by value on create with curator provenance", async () => {
+      const root = newRoot("create-foreign-created-by");
+      const mgr = new SkillManager(root);
+      const result = await mgr.applyBatch(
+        [
+          {
+            type: "create",
+            skillName: "eta",
+            content: "---\nname: eta\ncreated_by: someone-else\n---\n\nBody.\n",
+          },
+        ],
+        [],
+        ctx,
+      );
+      expect(result.outcome).toBe("applied");
+      expect(readSkillMd(root, "eta")).toContain("created_by: paseo-curator");
+      expect(readSkillMd(root, "eta")).not.toContain("someone-else");
     });
   });
 
@@ -217,6 +239,50 @@ describe("SkillManager.applyBatch", () => {
       expect(result.outcome).toBe("applied");
       expect(readSkillMd(root, "patch-skill")).toContain("Step two: do Z.");
       expect(readSkillMd(root, "patch-skill")).toContain("Step one: do X.");
+    });
+
+    it("applies a body patch to a pre-existing skill that has no created_by field", async () => {
+      const root = newRoot("patch-no-created-by");
+      const mgr = new SkillManager(root);
+      // A user-authored skill predating the plugin: frontmatter without
+      // created_by. A body-only patch must be allowed.
+      const content = "---\nname: legacy\n---\n\nStep one: do X.\n";
+      createSkill(root, "legacy", content);
+      const entry = readToEntry(root, "legacy", "SKILL.md");
+
+      const result = await mgr.applyBatch(
+        [makePatchOp("legacy", "Step one: do X.", "Step one: do X carefully.")],
+        [entry],
+        ctx,
+      );
+      expect(result.outcome).toBe("applied");
+      const updated = readSkillMd(root, "legacy");
+      expect(updated).toContain("Step one: do X carefully.");
+      // Provenance stays absent — a patch never adds or removes it.
+      expect(updated).not.toContain("created_by");
+    });
+
+    it("rolls back a patch that changes the frontmatter created_by value", async () => {
+      const root = newRoot("patch-changes-created-by");
+      const mgr = new SkillManager(root);
+      createSkill(root, "owned", skillMd("owned", "Body line.\n"));
+      const entry = readToEntry(root, "owned", "SKILL.md");
+
+      const result = await mgr.applyBatch(
+        [
+          makePatchOp(
+            "owned",
+            "created_by: paseo-curator",
+            "created_by: attacker",
+          ),
+        ],
+        [entry],
+        ctx,
+      );
+      expect(result.outcome).toBe("rolled_back");
+      expect(result.rejectionReason).toContain("created_by");
+      expect(readSkillMd(root, "owned")).toContain("created_by: paseo-curator");
+      expect(readSkillMd(root, "owned")).not.toContain("attacker");
     });
 
     it("rejects patch when oldText is not found", async () => {

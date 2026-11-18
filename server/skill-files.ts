@@ -737,33 +737,79 @@ export function validateFrontmatter(
 }
 
 /**
- * Validate that `content` parses as frontmatter with a `name` field matching
- * `skillName` (used to validate the post-patch SKILL.md). The `created_by`
- * field is not required here — a patch must not change provenance, so the
- * existing value is preserved, but a patch that *removes* `created_by` would
- * fail this check because it would make the skill unmanageable.
+ * Provenance value the curator stamps on every skill it creates. Maintenance
+ * uses it to restrict automatic archiving to curator-created skills.
+ */
+export const CURATOR_PROVENANCE = "paseo-curator";
+
+/**
+ * Return `content` with the frontmatter `created_by` field set to
+ * {@link CURATOR_PROVENANCE}.
+ *
+ * Provenance is a plugin-controlled fact, never a model choice: a create
+ * operation's content is stamped regardless of what the curator agent wrote
+ * (missing, empty, or foreign values are all overwritten). Content without a
+ * parseable frontmatter block is returned unchanged — validation elsewhere
+ * rejects it.
+ */
+export function stampCuratorProvenance(content: string): string {
+  const parsed = parseFrontmatter(content);
+  if (parsed === null) return content;
+  if (parsed.frontmatter.createdBy === CURATOR_PROVENANCE) return content;
+  const lines = content.split("\n");
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return content;
+  const stamped = `created_by: ${CURATOR_PROVENANCE}`;
+  let replaced = false;
+  for (let i = 1; i < end; i++) {
+    if (/^created_by\s*:/.test(lines[i])) {
+      lines[i] = stamped;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) {
+    lines.splice(end, 0, stamped);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Validate that a patch to `SKILL.md` preserves the frontmatter: the block
+ * must still parse, the `name` must be unchanged, and `created_by` must be
+ * invariant — the after value must equal the before value. A skill that
+ * never carried `created_by` (e.g. a pre-existing user skill) may stay
+ * without one; what a patch must never do is change provenance.
  */
 export function validateFrontmatterPreserved(
   skillName: string,
-  content: string,
+  before: string,
+  after: string,
 ): void {
-  const parsed = parseFrontmatter(content);
-  if (parsed === null) {
+  const parsedAfter = parseFrontmatter(after);
+  if (parsedAfter === null) {
     throw new FrontmatterError(skillName, "patch would remove the frontmatter block");
   }
-  const { name, createdBy, keys } = parsed.frontmatter;
-  if (name !== skillName) {
+  if (parsedAfter.frontmatter.name !== skillName) {
     throw new FrontmatterError(
       skillName,
-      `patch would change frontmatter name from "${skillName}" to "${name}"`,
+      `patch would change frontmatter name from "${skillName}" to "${parsedAfter.frontmatter.name}"`,
     );
   }
-  if (createdBy === null && keys.includes("created_by")) {
-    throw new FrontmatterError(skillName, "patch would empty the `created_by` field");
-  }
-  if (createdBy === null && !keys.includes("created_by")) {
-    // A patch that removes created_by entirely is destructive to provenance.
-    throw new FrontmatterError(skillName, "patch would remove the `created_by` field");
+  const parsedBefore = parseFrontmatter(before);
+  const beforeCreatedBy = parsedBefore?.frontmatter.createdBy ?? null;
+  const afterCreatedBy = parsedAfter.frontmatter.createdBy;
+  if (beforeCreatedBy !== afterCreatedBy) {
+    throw new FrontmatterError(
+      skillName,
+      `patch would change \`created_by\` from ${JSON.stringify(beforeCreatedBy)} to ${JSON.stringify(afterCreatedBy)}`,
+    );
   }
 }
 

@@ -14,6 +14,7 @@ import {
   sha256,
   snapshotSkill,
   validateFrontmatter,
+  stampCuratorProvenance,
   validateFrontmatterPreserved,
   validateSkillName,
   verifyContained,
@@ -368,11 +369,17 @@ export class SkillManager {
           };
         }
         this.removeBatchIntent(context.queueId);
+        // Carry the failing operation's structured, secret-safe error so the
+        // rejection is diagnosable without forensic reproduction.
+        const failedOutcome = outcomes.find((o) => o.status === "failed");
         return {
           outcome: "rolled_back",
           outcomes,
           fileHashes,
-          rejectionReason: `operation ${failedIndex} failed; all mutations rolled back`,
+          rejectionReason:
+            `operation ${failedIndex} failed` +
+            (failedOutcome?.error ? `: ${failedOutcome.error}` : "") +
+            "; all mutations rolled back",
         };
       }
 
@@ -704,7 +711,9 @@ export class SkillManager {
       switch (op.type) {
         case "create": {
           try {
-            validateFrontmatter(op.skillName, op.content);
+            // Validate the content the plugin will actually write: provenance
+            // is stamped by the manager, never trusted from the model.
+            validateFrontmatter(op.skillName, stampCuratorProvenance(op.content));
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
@@ -779,9 +788,9 @@ export class SkillManager {
             return `create: skill already exists: ${op.skillName}`;
           }
           // The frontmatter must be valid and the content must match what
-          // will be written.
+          // will be written (with plugin-stamped provenance).
           try {
-            validateFrontmatter(op.skillName, op.content);
+            validateFrontmatter(op.skillName, stampCuratorProvenance(op.content));
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
@@ -1024,7 +1033,7 @@ export class SkillManager {
       switch (op.type) {
         case "create": {
           const files = virtual.get(op.skillName) ?? new Map<string, string | null>();
-          files.set("SKILL.md", op.content);
+          files.set("SKILL.md", stampCuratorProvenance(op.content));
           virtual.set(op.skillName, files);
           break;
         }
@@ -1106,7 +1115,9 @@ export class SkillManager {
 
     switch (op.type) {
       case "create": {
-        const content = op.content;
+        // Provenance is stamped by the plugin, never trusted from the model:
+        // the written file always carries created_by: paseo-curator.
+        const content = stampCuratorProvenance(op.content);
         // Update the virtual state.
         const files = virtual.get(op.skillName) ?? new Map<string, string | null>();
         files.set("SKILL.md", content);
@@ -1143,9 +1154,10 @@ export class SkillManager {
         const updated = current.replace(op.oldText, op.newText);
         files.set(op.path, updated);
 
-        // If the patch targets SKILL.md, validate the frontmatter is preserved.
+        // If the patch targets SKILL.md, validate the frontmatter is
+        // preserved (name unchanged, created_by invariant).
         if (op.path === "SKILL.md") {
-          validateFrontmatterPreserved(op.skillName, updated);
+          validateFrontmatterPreserved(op.skillName, current, updated);
         }
 
         // Re-check containment at write time (F-2).
