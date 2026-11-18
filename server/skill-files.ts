@@ -686,7 +686,7 @@ export function parseFrontmatter(content: string): { frontmatter: ParsedFrontmat
     }
     keys.push(key);
     if (key === "name") name = value;
-    else if (key === "created_by") createdBy = value;
+    else if (key === "created_by") createdBy = value.length > 0 ? value : null;
   }
 
   return {
@@ -713,6 +713,15 @@ export function validateFrontmatter(
     throw new FrontmatterError(skillName, "missing or malformed frontmatter block");
   }
   const { name, createdBy, keys } = parsed.frontmatter;
+  // Duplicate keys make the effective value resolution-dependent; they are
+  // malformed and rejected outright so stamping invariants stay verifiable.
+  const duplicates = keys.filter((key, index) => keys.indexOf(key) !== index);
+  if (duplicates.length > 0) {
+    throw new FrontmatterError(
+      skillName,
+      `duplicate frontmatter key "${duplicates[0]}"`,
+    );
+  }
   if (name.length === 0) {
     throw new FrontmatterError(skillName, "`name` is missing or empty");
   }
@@ -755,7 +764,13 @@ export const CURATOR_PROVENANCE = "paseo-curator";
 export function stampCuratorProvenance(content: string): string {
   const parsed = parseFrontmatter(content);
   if (parsed === null) return content;
-  if (parsed.frontmatter.createdBy === CURATOR_PROVENANCE) return content;
+  if (parsed.frontmatter.createdBy === CURATOR_PROVENANCE) {
+    // Already stamped. Still normalize duplicate created_by keys: a
+    // duplicate carrying a foreign value must not survive as the parser's
+    // last-wins effective provenance.
+    const seen = parsed.frontmatter.keys.filter((k) => k === "created_by").length;
+    if (seen <= 1) return content;
+  }
   const lines = content.split("\n");
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
@@ -767,11 +782,13 @@ export function stampCuratorProvenance(content: string): string {
   if (end === -1) return content;
   const stamped = `created_by: ${CURATOR_PROVENANCE}`;
   let replaced = false;
-  for (let i = 1; i < end; i++) {
+  // Rewrite the first created_by line and remove every later duplicate, so
+  // the stamped value is unambiguous under any duplicate-resolution rule.
+  for (let i = end - 1; i >= 1; i--) {
     if (/^created_by\s*:/.test(lines[i])) {
-      lines[i] = stamped;
+      if (replaced) lines.splice(i, 1);
+      else lines[i] = stamped;
       replaced = true;
-      break;
     }
   }
   if (!replaced) {

@@ -218,6 +218,92 @@ describe("SkillManager.applyBatch", () => {
       expect(readSkillMd(root, "eta")).toContain("created_by: paseo-curator");
       expect(readSkillMd(root, "eta")).not.toContain("someone-else");
     });
+
+    it("normalizes duplicate created_by keys on create, keeping only curator provenance", async () => {
+      const root = newRoot("create-duplicate-created-by");
+      const mgr = new SkillManager(root);
+      // Duplicate keys with a foreign value last: the parser is last-wins,
+      // so without normalization the model would control effective provenance.
+      const result = await mgr.applyBatch(
+        [
+          {
+            type: "create",
+            skillName: "theta",
+            content:
+              "---\nname: theta\ncreated_by: paseo-curator\ncreated_by: attacker\n---\n\nBody.\n",
+          },
+        ],
+        [],
+        ctx,
+      );
+      expect(result.outcome).toBe("applied");
+      const written = readSkillMd(root, "theta");
+      expect(written).toContain("created_by: paseo-curator");
+      expect(written).not.toContain("attacker");
+      expect(written.match(/created_by:/g)).toHaveLength(1);
+    });
+
+    it("rejects create with duplicate non-provenance frontmatter keys", async () => {
+      const root = newRoot("create-duplicate-generic-key");
+      const mgr = new SkillManager(root);
+      const result = await mgr.applyBatch(
+        [
+          {
+            type: "create",
+            skillName: "iota",
+            content: "---\nname: iota\ndescription: A\ndescription: B\n---\n\nBody.\n",
+          },
+        ],
+        [],
+        ctx,
+      );
+      expect(result.outcome).toBe("rejected");
+      expect(result.rejectionReason).toContain("duplicate frontmatter key");
+      expect(skillDirExists(root, "iota")).toBe(false);
+    });
+
+    it("rejects write_file that targets SKILL.md", async () => {
+      const root = newRoot("write-file-skill-md");
+      const mgr = new SkillManager(root);
+      createSkill(root, "wf", skillMd("wf", "Body.\n"));
+      const result = await mgr.applyBatch(
+        [
+          {
+            type: "write_file",
+            skillName: "wf",
+            path: "SKILL.md",
+            content: "---\nname: wf\ncreated_by: attacker\n---\n\nForged.\n",
+          },
+        ],
+        [],
+        ctx,
+      );
+      // SKILL.md owns provenance; recreating it via write_file would bypass
+      // stamping and both frontmatter validators.
+      expect(result.outcome).toBe("rejected");
+      expect(result.rejectionReason).toContain("cannot target SKILL.md");
+      expect(readSkillMd(root, "wf")).toContain("paseo-curator");
+      expect(readSkillMd(root, "wf")).not.toContain("Forged.");
+    });
+
+    it("still allows write_file to support files under references/", async () => {
+      const root = newRoot("write-file-references");
+      const mgr = new SkillManager(root);
+      createSkill(root, "wfr", skillMd("wfr", "Body.\n"));
+      const result = await mgr.applyBatch(
+        [
+          {
+            type: "write_file",
+            skillName: "wfr",
+            path: "references/notes.md",
+            content: "# Notes\n",
+          },
+        ],
+        [],
+        ctx,
+      );
+      expect(result.outcome).toBe("applied");
+    });
   });
 
   // -----------------------------------------------------------------------

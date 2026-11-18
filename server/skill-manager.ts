@@ -16,6 +16,7 @@ import {
   validateFrontmatter,
   stampCuratorProvenance,
   validateFrontmatterPreserved,
+  CURATOR_PROVENANCE,
   validateSkillName,
   verifyContained,
   type RestoreSkillFn,
@@ -712,8 +713,11 @@ export class SkillManager {
         case "create": {
           try {
             // Validate the content the plugin will actually write: provenance
-            // is stamped by the manager, never trusted from the model.
-            validateFrontmatter(op.skillName, stampCuratorProvenance(op.content));
+            // is stamped by the manager, never trusted from the model, and
+            // the stamped result is verified, not assumed.
+            validateFrontmatter(op.skillName, stampCuratorProvenance(op.content), {
+              expectCreatedBy: CURATOR_PROVENANCE,
+            });
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
@@ -735,6 +739,12 @@ export class SkillManager {
         case "write_file": {
           const pathErr = this.checkPath(op.skillName, op.path);
           if (pathErr) return pathErr;
+          // SKILL.md owns provenance and frontmatter structure; recreating
+          // it through write_file (e.g. after remove_file) would bypass the
+          // stamping and validation the create and patch paths enforce.
+          if (op.path === "SKILL.md") {
+            return `write_file: cannot target SKILL.md: ${op.skillName} (use create or patch)`;
+          }
           break;
         }
 
@@ -788,9 +798,11 @@ export class SkillManager {
             return `create: skill already exists: ${op.skillName}`;
           }
           // The frontmatter must be valid and the content must match what
-          // will be written (with plugin-stamped provenance).
+          // will be written (with plugin-stamped, verified provenance).
           try {
-            validateFrontmatter(op.skillName, stampCuratorProvenance(op.content));
+            validateFrontmatter(op.skillName, stampCuratorProvenance(op.content), {
+              expectCreatedBy: CURATOR_PROVENANCE,
+            });
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
@@ -927,6 +939,11 @@ export class SkillManager {
     const skillVirtual = virtual.get(op.skillName);
     if (skillVirtual === undefined) {
       return `write_file: skill does not exist: ${op.skillName}`;
+    }
+    // SKILL.md cannot be recreated through write_file: it would bypass the
+    // provenance stamping and frontmatter validation the create path owns.
+    if (op.path === "SKILL.md") {
+      return `write_file: cannot target SKILL.md: ${op.skillName} (use create or patch)`;
     }
     const existing = skillVirtual.get(op.path);
     if (existing !== undefined && existing !== null) {
@@ -1179,6 +1196,12 @@ export class SkillManager {
         const files = virtual.get(op.skillName) ?? new Map<string, string | null>();
         if (files.has(op.path) && files.get(op.path) !== null) {
           throw new Error(`write_file: file already exists: ${op.skillName}/${op.path}`);
+        }
+        // Write-time defense (F-2 style): SKILL.md must never be recreated
+        // through write_file; preflight and snapshot validation reject it,
+        // and this guard holds even if they were bypassed.
+        if (op.path === "SKILL.md") {
+          throw new Error(`write_file: cannot target SKILL.md: ${op.skillName} (use create or patch)`);
         }
         files.set(op.path, op.content);
         virtual.set(op.skillName, files);
