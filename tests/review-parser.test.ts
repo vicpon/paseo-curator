@@ -233,6 +233,44 @@ describe("trailing payload rejection", () => {
     const r = parseReviewResult(`\`\`\`json\n${raw(doc({}))}\n\`\`\`\n\n\n`);
     expect(r).not.toBeNull();
   });
+
+  it("accepts a plain JSON document whose string values contain markdown fences", () => {
+    // Skill bodies are full of code fences; a readSet entry echoing such a
+    // skill embeds ``` inside JSON string values. The plain-JSON path is
+    // string-aware, so those fences must not look like document fences.
+    const d = {
+      ...doc({}),
+      readSet: [
+        {
+          skillName: "fenced-skill",
+          path: "SKILL.md",
+          content: "---\nname: fenced-skill\n---\n\nExample:\n\n```\ncode here\n```\n\nEnd.\n",
+          hash: sha256("---\nname: fenced-skill\n---\n\nExample:\n\n```\ncode here\n```\n\nEnd.\n"),
+        },
+      ],
+    };
+    const r = parseReviewResult(raw(d));
+    expect(r).not.toBeNull();
+    expect(r?.readSet).toHaveLength(1);
+  });
+
+  it("accepts a fenced JSON document whose string values contain markdown fences", () => {
+    const content = "# Guide\n\n```bash\nls -la\n```\n\nDone.\n";
+    const d = {
+      ...doc({}),
+      readSet: [
+        {
+          skillName: "fenced-skill",
+          path: "SKILL.md",
+          content,
+          hash: sha256(content),
+        },
+      ],
+    };
+    const r = parseReviewResult(`Intro chatter.\n\`\`\`json\n${raw(d)}\n\`\`\`\ntrailing chatter`);
+    expect(r).not.toBeNull();
+    expect(r?.readSet[0]?.hash).toBe(sha256(content));
+  });
 });
 
 // ===========================================================================

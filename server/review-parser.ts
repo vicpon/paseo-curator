@@ -85,15 +85,20 @@ function containsCompleteJsonObject(text: string): boolean {
  *
  * Accepts exactly one of:
  *  - a plain JSON object: the entire trimmed response is a JSON object, with
- *    nothing (other than whitespace) before or after it.
- *  - a fenced JSON object: exactly one `json` fenced code block
- *    (case-insensitive tag) containing one JSON object. Surrounding prose is
- *    tolerated as model chatter, provided the prose does not itself contain
- *    a complete JSON object (which would make the document ambiguous) or
- *    another fence.
+ *    nothing (other than whitespace) before or after it. Parsing is
+ *    string-aware, so markdown fences inside JSON string values (skill
+ *    bodies are full of code fences) do not disturb it. This case is tried
+ *    first for exactly that reason.
+ *  - a fenced JSON object: the first fence carries a `json` tag
+ *    (case-insensitive) and the body extends to the LAST fence marker in
+ *    the response, so fences embedded inside JSON string values remain part
+ *    of the body. Surrounding prose is tolerated as model chatter, provided
+ *    the prose does not itself contain a complete JSON object (which would
+ *    make the document ambiguous) or a second genuine fenced document.
  *
- * Rejects (returns null): more than one fence, prose containing a complete
- * second JSON object, a fenced block with any non-JSON language tag, and any
+ * Rejects (returns null): a non-JSON first fence tag, a body that is not
+ * exactly one JSON object (including a second fenced document after the
+ * first), prose containing a complete second JSON object, and any
  * non-object JSON value.
  *
  * @returns the raw JSON document string, or null if the response does not
@@ -103,56 +108,49 @@ function extractJsonDocument(rawInput: string): string | null {
   const text = rawInput;
   if (text.trim().length === 0) return null;
 
-  // Case 1: fenced blocks. Find every markdown fence. A valid fenced block is
-  // a balanced ``` opener (optionally tagged) paired with a ``` closer; any
-  // ``` not part of such a pair makes the response ambiguous → reject.
-  const fences: Array<{ tag: string; start: number; bodyStart: number; close: number }> = [];
-  let i = 0;
-  while (i < text.length) {
-    const idx = text.indexOf("```", i);
-    if (idx === -1) break;
-    // Determine the tag: a single optional newline, then identifier chars.
-    let bodyStart = idx + 3;
-    if (bodyStart < text.length && text[bodyStart] === "\n") bodyStart++;
-    let tag = "";
-    let j = bodyStart;
-    while (j < text.length && /[a-zA-Z0-9]/.test(text[j])) {
-      tag += text[j];
-      j++;
-    }
-    if (j > bodyStart) bodyStart = j;
-    const close = text.indexOf("```", bodyStart);
-    if (close === -1) {
-      // Unclosed fence → ambiguous; cannot be the single fenced document.
-      return null;
-    }
-    fences.push({ tag, start: idx, bodyStart, close });
-    i = close + 3;
+  // Case 1: the response IS a plain JSON object (possibly with fences
+  // embedded inside its string values). String-aware verification means
+  // embedded ``` sequences never break this path.
+  const trimmedStartsObject = text.trimStart().startsWith("{");
+  if (trimmedStartsObject) {
+    const r = verifySingleObject(text);
+    if (r.ok === "object") return r.json;
+    // A complete object followed by more content falls through to the
+    // fence logic: the trailing content may be chatter after a fenced
+    // document, or an ambiguity the guards below will reject.
   }
 
-  if (fences.length > 0) {
-    // Any fence present: the response must contain exactly one fenced block.
-    // Surrounding prose is tolerated as model chatter (e.g. a sentence before
-    // the document); it is never treated as content. Prose that itself
-    // contains a ``` fence makes the block count differ from one → reject.
-    if (fences.length !== 1) return null;
-    const f = fences[0];
-    if (f.tag.toLowerCase() !== "json") return null;
-    // Prose outside the block must not contain a complete rival JSON object.
-    const before = text.slice(0, f.start);
-    const after = text.slice(f.close + 3);
-    if (containsCompleteJsonObject(before) || containsCompleteJsonObject(after)) {
-      return null;
-    }
-    const body = text.slice(f.bodyStart, f.close);
-    if (body.trim().length === 0) return null;
-    const r = verifySingleObject(body);
-    return r.ok === "object" ? r.json : null;
+  // Case 2: fenced blocks. The document fence is the FIRST fence in the
+  // response; its body extends to the LAST fence marker, so fences inside
+  // JSON string values stay in the body.
+  const firstFence = text.indexOf("```");
+  if (firstFence === -1) return null;
+
+  // The tag: identifier characters immediately after the opener.
+  let bodyStart = firstFence + 3;
+  if (bodyStart < text.length && text[bodyStart] === "\n") bodyStart++;
+  let tag = "";
+  let j = bodyStart;
+  while (j < text.length && /[a-zA-Z0-9]/.test(text[j])) {
+    tag += text[j];
+    j++;
+  }
+  if (j > bodyStart) bodyStart = j;
+  if (tag.toLowerCase() !== "json") return null;
+
+  const lastFence = text.lastIndexOf("```");
+  if (lastFence <= firstFence) return null; // unclosed fence
+  const body = text.slice(bodyStart, lastFence);
+  if (body.trim().length === 0) return null;
+
+  // Prose outside the block must not contain a complete rival JSON object.
+  const before = text.slice(0, firstFence);
+  const after = text.slice(lastFence + 3);
+  if (containsCompleteJsonObject(before) || containsCompleteJsonObject(after)) {
+    return null;
   }
 
-  // Case 2: no fences → must be a single plain JSON object, whitespace-only
-  // surrounding. Verify by parsing and checking no non-whitespace follows.
-  const r = verifySingleObject(text);
+  const r = verifySingleObject(body);
   return r.ok === "object" ? r.json : null;
 }
 

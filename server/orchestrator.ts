@@ -540,8 +540,13 @@ export class CuratorOrchestrator {
   private async notifyBestEffort(notification: CuratorActivityNotification): Promise<void> {
     try {
       await this.notify(notification);
-    } catch {
+    } catch (err) {
       // Timeline visibility must never change the durable review outcome.
+      // Surface only the error's class name (never its message, which may
+      // carry untrusted content) so notification failures stay diagnosable.
+      console.error(
+        `[curator] timeline notify failed: ${err instanceof Error ? err.name : "unknown-error"}`,
+      );
     }
   }
 }
