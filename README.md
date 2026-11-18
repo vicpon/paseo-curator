@@ -104,7 +104,7 @@ Durable state includes cadence counters, queue claims and retries, reconciliatio
 
 The curator stays quiet when a review finds nothing reusable. It does not add a “no reusable lesson found” message to your timeline.
 
-When a review makes a real change, a **Curator updated skills** card appears in the source agent's timeline with the number of changes and affected skill names. If a review exhausts its retries or reaches a terminal safety failure, a **Curator review failed** card appears instead. These cards are appended only after the durable queue state has been updated; notification failure cannot change the review outcome.
+When a review makes a real change, a single muted subtext line appears in the source agent's timeline — **Self-improvement review — updated \<skills\>** — listing the affected skill names (and change count when more than one). If a review exhausts its retries or reaches a terminal safety failure, a compact danger-colored line — **Curator review failed** — appears instead. These notices are appended only after the durable queue state has been updated; notification failure cannot change the review outcome.
 
 Use these commands while testing:
 

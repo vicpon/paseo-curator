@@ -1,55 +1,26 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import { Text, View } from "react-native";
+import { Text } from "react-native";
 import type { CuratorActivityData } from "../shared/activity";
 
+/**
+ * Compact, subtext-style rendering: a single muted line, like Hermes'
+ * self-improvement notice. No box, no border — the activity is informational,
+ * not a message that demands attention.
+ */
 export function CuratorActivity({ item, theme }: PluginTimelineItemProps<CuratorActivityData>) {
   if (item.data.outcome === "applied") {
-    const operationLabel =
-      item.data.operationCount === 1 ? "1 change" : `${item.data.operationCount} changes`;
-    const skillLabel =
-      item.data.skillNames.length === 1 ? "1 skill" : `${item.data.skillNames.length} skills`;
-
+    const skills = item.data.skillNames.length > 0 ? item.data.skillNames.join(", ") : "skills";
     return (
-      <View
-        style={{
-          gap: 6,
-          borderWidth: 1,
-          borderColor: theme.colors.statusSuccess,
-          borderRadius: 10,
-          padding: 12,
-          backgroundColor: theme.colors.surface1,
-        }}
-      >
-        <Text style={{ color: theme.colors.foreground, fontWeight: "600" }}>
-          Curator updated skills
-        </Text>
-        <Text style={{ color: theme.colors.foregroundMuted }}>
-          {operationLabel} across {skillLabel}
-        </Text>
-        {item.data.skillNames.length > 0 ? (
-          <Text style={{ color: theme.colors.foreground }}>{item.data.skillNames.join(", ")}</Text>
-        ) : null}
-      </View>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, paddingVertical: 2 }}>
+        Self-improvement review — updated {skills}
+        {item.data.operationCount > 1 ? ` (${item.data.operationCount} changes)` : ""}
+      </Text>
     );
   }
 
   return (
-    <View
-      style={{
-        gap: 6,
-        borderWidth: 1,
-        borderColor: theme.colors.statusDanger,
-        borderRadius: 10,
-        padding: 12,
-        backgroundColor: theme.colors.surface1,
-      }}
-    >
-      <Text style={{ color: theme.colors.foreground, fontWeight: "600" }}>
-        Curator review failed
-      </Text>
-      <Text style={{ color: theme.colors.foregroundMuted }}>
-        No skill changes were made. Check the curator audit log for details.
-      </Text>
-    </View>
+    <Text style={{ color: theme.colors.statusDanger, fontSize: 12, paddingVertical: 2 }}>
+      Curator review failed — no changes made (see curator audit log)
+    </Text>
   );
 }
