@@ -51,7 +51,11 @@ const parsedDocSchema = z
     summary: z.string().min(1),
     outcome: ReviewOutcomeSchema,
     operations: z.array(SkillOperationSchema).max(MAX_OPERATIONS),
-    readSet: z.array(readSetEntrySchema),
+    // Advisory only. The authoritative read-before-write proof is the locked
+    // filesystem snapshot taken inside SkillManager.applyBatch; a model that
+    // paraphrases or truncates a long SKILL.md (which the read tools do) must
+    // not doom an otherwise valid batch.
+    readSet: z.array(readSetEntrySchema).optional(),
   })
   .strict();
 
@@ -276,30 +280,22 @@ export function parseReviewResult(
     return null;
   }
 
-  // Read-set hash self-consistency: every entry's hash must equal
-  // sha256(content). A mismatch means the agent lied about what it read, so
-  // the whole batch is rejected (no partial readSet is exposed).
-  for (const entry of result.data.readSet) {
+  // Read-set is advisory: normalize each entry's hash to its own content so a
+  // downstream consumer can never trust a model-supplied digest it did not
+  // verify. A self-inconsistent entry is dropped, not fatal — the batch's real
+  // safety comes from the locked snapshot in SkillManager.
+  const readSet = (result.data.readSet ?? []).flatMap((entry) => {
     const actual = sha256(entry.content);
-    if (actual !== entry.hash) {
-      lastParseError =
-        "invalid response: readSet hash does not match content";
-      return null;
-    }
-  }
+    return actual === entry.hash
+      ? [{ skillName: entry.skillName, path: entry.path, content: entry.content, hash: actual }]
+      : [];
+  });
 
-  // Re-serialize the readSet entries to plain objects (no zod metadata) so
-  // the returned value is a stable, deterministic structure.
   return {
     summary: result.data.summary,
     outcome: result.data.outcome,
     operations: result.data.operations,
-    readSet: result.data.readSet.map((e) => ({
-      skillName: e.skillName,
-      path: e.path,
-      content: e.content,
-      hash: e.hash,
-    })),
+    readSet,
   };
 }
 

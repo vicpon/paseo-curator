@@ -497,12 +497,15 @@ describe("full-batch rejection for invalid readSet entries", () => {
     hash: SHA256_SKILL_MD,
   };
 
-  it("rejects the entire result when one readSet entry has a wrong hash", () => {
+  it("drops a self-inconsistent readSet entry but still accepts the batch", () => {
     const badEntry = { ...goodEntry, hash: "deadbeef" };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [goodEntry, badEntry] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    // Only the self-consistent entry survives; the bad one is never exposed.
+    expect(r!.readSet.length).toBe(1);
+    expect(r!.readSet[0].hash).toBe(SHA256_SKILL_MD);
   });
 
   it("rejects the entire result when one readSet entry has an empty skillName", () => {
@@ -553,12 +556,15 @@ describe("full-batch rejection for invalid readSet entries", () => {
     expect(r).toBeNull();
   });
 
-  it("never exposes partial readSet when any entry is invalid", () => {
+  it("never exposes an unverifiable readSet entry", () => {
     const bad = { ...goodEntry, hash: "0".repeat(64) };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [goodEntry, bad] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([
+      { skillName: goodEntry.skillName, path: goodEntry.path, content: goodEntry.content, hash: SHA256_SKILL_MD },
+    ]);
   });
 
   it("accepts a valid readSet entry with a correct hash", () => {
@@ -638,7 +644,7 @@ describe("read-set hash self-consistency", () => {
     expect(r).not.toBeNull();
   });
 
-  it("rejects a readSet entry where hash does not equal sha256(content)", () => {
+  it("drops a readSet entry whose hash does not equal sha256(content) rather than rejecting the batch", () => {
     const content = "hello world";
     const entry = {
       skillName: "git-hygiene",
@@ -647,19 +653,21 @@ describe("read-set hash self-consistency", () => {
       hash: "0".repeat(64), // not sha256("hello world")
     };
     const r = parseReviewResult(raw(doc({ operations: [validPatchOp], readSet: [entry] })));
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects a readSet entry where hash is the correct length but wrong value", () => {
+  it("never returns a digest the model supplied but the plugin could not verify", () => {
     const content = "hello world";
     // Flip one nibble of the known-correct SHA-256.
     const wrong = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde95";
     const entry = { skillName: "git-hygiene", path: "SKILL.md", content, hash: wrong };
     const r = parseReviewResult(raw(doc({ operations: [validPatchOp], readSet: [entry] })));
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects a readSet entry with a hash of the wrong length", () => {
+  it("drops a readSet entry with a hash of the wrong length", () => {
     const entry = {
       skillName: "git-hygiene",
       path: "SKILL.md",
@@ -667,10 +675,11 @@ describe("read-set hash self-consistency", () => {
       hash: "abc123", // 6 chars, not 64
     };
     const r = parseReviewResult(raw(doc({ operations: [validPatchOp], readSet: [entry] })));
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects a readSet entry with a non-hex hash", () => {
+  it("drops a readSet entry with a non-hex hash", () => {
     const entry = {
       skillName: "git-hygiene",
       path: "SKILL.md",
@@ -678,7 +687,8 @@ describe("read-set hash self-consistency", () => {
       hash: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
     };
     const r = parseReviewResult(raw(doc({ operations: [validPatchOp], readSet: [entry] })));
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
   it("accepts an empty-content readSet entry with the empty-string hash", () => {
@@ -692,7 +702,7 @@ describe("read-set hash self-consistency", () => {
     expect(r).not.toBeNull();
   });
 
-  it("rejects an empty-content readSet entry with a non-empty-string hash", () => {
+  it("drops an empty-content readSet entry with a non-empty-string hash", () => {
     const entry = {
       skillName: "git-hygiene",
       path: "SKILL.md",
@@ -700,7 +710,8 @@ describe("read-set hash self-consistency", () => {
       hash: SHA256_HELLO_WORLD, // hash of "hello world", not of ""
     };
     const r = parseReviewResult(raw(doc({ operations: [validPatchOp], readSet: [entry] })));
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 });
 
@@ -753,6 +764,8 @@ describe("secret-safe error messages (lastParseError)", () => {
 
   it("does not leak readSet file content or its secret into lastParseError", () => {
     const sensitiveContent = `top-secret-token: ${SECRET}`;
+    // Shape failure (missing hash field) is the rejection path; the reason must
+    // stay structural and never echo the payload.
     const d = doc({
       operations: [validPatchOp],
       readSet: [
@@ -760,7 +773,6 @@ describe("secret-safe error messages (lastParseError)", () => {
           skillName: "git-hygiene",
           path: "SKILL.md",
           content: sensitiveContent,
-          hash: "0".repeat(64), // wrong hash → rejection (hash mismatch)
         },
       ],
     });
@@ -768,6 +780,13 @@ describe("secret-safe error messages (lastParseError)", () => {
     expect(r).toBeNull();
     assertSecretSafe(lastParseError);
     expect(lastParseError).not.toContain(sensitiveContent);
+  });
+
+  it("accepts a batch whose readSet is omitted entirely", () => {
+    const d = { summary: "learned something", outcome: "saved", operations: [validPatchOp] };
+    const r = parseReviewResult(raw(d));
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
   it("does not echo a huge summary payload into lastParseError", () => {

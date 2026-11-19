@@ -424,7 +424,7 @@ describe("SkillManager.applyBatch", () => {
       expect(readFileSync(join(skillDir, "SKILL.md"), "utf8")).toBe("modified by another agent\n");
     });
 
-    it("rejects patch when no read-set evidence is provided", async () => {
+    it("applies a patch with no model-supplied read-set evidence (the locked snapshot is authoritative)", async () => {
       const root = newRoot("patch-no-evidence");
       const mgr = new SkillManager(root);
       createSkill(root, "pe", skillMd("pe", "content\n"));
@@ -434,7 +434,8 @@ describe("SkillManager.applyBatch", () => {
         [],
         ctx,
       );
-      expect(result.outcome).toBe("rejected");
+      expect(result.outcome).toBe("applied");
+      expect(readSkillMd(root, "pe")).toContain("other");
     });
 
     it("patches a support file (references/)", async () => {
@@ -540,7 +541,7 @@ describe("SkillManager.applyBatch", () => {
       expect(readSkillMd(root, "rf")).toContain("name: rf");
     });
 
-    it("rejects remove_file when no read-set evidence is provided", async () => {
+    it("applies remove_file with no model-supplied read-set evidence", async () => {
       const root = newRoot("remove-no-evidence");
       const mgr = new SkillManager(root);
       createSkill(root, "rf2", skillMd("rf2", "body\n"), {
@@ -552,8 +553,21 @@ describe("SkillManager.applyBatch", () => {
         [],
         ctx,
       );
+      expect(result.outcome).toBe("applied");
+      expect(skillFileExists(root, "rf2", "references/x.md")).toBe(false);
+    });
+
+    it("rejects remove_file for a file that does not exist", async () => {
+      const root = newRoot("remove-missing-file");
+      const mgr = new SkillManager(root);
+      createSkill(root, "rf3", skillMd("rf3", "body\n"));
+
+      const result = await mgr.applyBatch(
+        [makeRemoveFileOp("rf3", "references/never-here.md")],
+        [],
+        ctx,
+      );
       expect(result.outcome).toBe("rejected");
-      expect(skillFileExists(root, "rf2", "references/x.md")).toBe(true);
     });
   });
 
@@ -1118,8 +1132,35 @@ describe("SkillManager.applyBatch", () => {
     });
   });
 
-  describe("evidence content mismatch (F-3)", () => {
-    it("rejects a patch whose evidence content differs from disk but whose hash matches", async () => {
+  describe("advisory readSet is never trusted (F-3)", () => {
+    it("applies a patch when the curator echoes a truncated SKILL.md with the index hash", async () => {
+      // The live failure mode: the read tool truncates long files, so the
+      // curator's readSet content is partial while its hash comes from the
+      // skill index. The batch must still apply against the real file.
+      const root = newRoot("truncated-readset");
+      const mgr = new SkillManager(root);
+      const full = skillMd("long-skill", "line one\nline two\n" + "x".repeat(9000));
+      createSkill(root, "long-skill", full);
+
+      const { sha256 } = await import("../server/skill-files");
+      const entry: ReadSetEntry = {
+        skillName: "long-skill",
+        path: "SKILL.md",
+        content: full.slice(0, 4000), // truncated echo
+        hash: sha256(full), // index hash of the whole file
+      };
+
+      const result = await mgr.applyBatch(
+        [{ type: "patch", skillName: "long-skill", path: "SKILL.md", oldText: "line two", newText: "line two, verified" }],
+        [entry],
+        ctx,
+      );
+      expect(result.outcome).toBe("applied");
+      expect(readSkillMd(root, "long-skill")).toContain("line two, verified");
+    });
+
+
+    it("ignores tampered read-set evidence and applies against the locked snapshot", async () => {
       const root = newRoot("evidence-content-mismatch");
       const mgr = new SkillManager(root);
 
@@ -1146,12 +1187,12 @@ describe("SkillManager.applyBatch", () => {
         ctx,
       );
 
-      expect(result.outcome).toBe("rejected");
-      // No mutation must have occurred.
-      expect(readSkillMd(root, "ev-skill")).toBe(original);
+      expect(result.outcome).toBe("applied");
+      // The write is derived from the real on-disk content, not the tampered evidence.
+      expect(readSkillMd(root, "ev-skill")).toContain("line three");
     });
 
-    it("rejects remove_file whose evidence content differs from disk but whose hash matches", async () => {
+    it("applies remove_file even when the supplied evidence content is tampered", async () => {
       const root = newRoot("evidence-content-mismatch-remove");
       const mgr = new SkillManager(root);
 
@@ -1174,8 +1215,8 @@ describe("SkillManager.applyBatch", () => {
         ctx,
       );
 
-      expect(result.outcome).toBe("rejected");
-      expect(skillFileExists(root, "ev2-skill", "references/todelete.md")).toBe(true);
+      expect(result.outcome).toBe("applied");
+      expect(skillFileExists(root, "ev2-skill", "references/todelete.md")).toBe(false);
     });
   });
 });

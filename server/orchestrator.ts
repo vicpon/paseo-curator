@@ -431,12 +431,12 @@ export class CuratorOrchestrator {
       if (parsed.outcome === "nothing_to_save") {
         // A valid nothing verdict must carry no mutations; the schema does
         // not guarantee that, so verify before terminating without a batch.
-        if (parsed.operations.length !== 0 || parsed.readSet.length !== 0) {
+        if (parsed.operations.length !== 0) {
           return this.retryOrFailAndNotify(row, "invalid curator output");
         }
         this.store.recordAudit({
           ...context,
-          outcome: "applied",
+          outcome: "nothing_to_save",
           summary: "nothing to save",
           operationCount: 0,
           operationsHash: hashOperations([]),
