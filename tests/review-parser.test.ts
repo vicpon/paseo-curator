@@ -508,52 +508,66 @@ describe("full-batch rejection for invalid readSet entries", () => {
     expect(r!.readSet[0].hash).toBe(SHA256_SKILL_MD);
   });
 
-  it("rejects the entire result when one readSet entry has an empty skillName", () => {
+  it("drops a readSet entry with an empty skillName", () => {
     const badEntry = { ...goodEntry, skillName: "" };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [badEntry] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects the entire result when one readSet entry has an empty path", () => {
+  it("drops a readSet entry with an empty path", () => {
     const badEntry = { ...goodEntry, path: "" };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [badEntry] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects the entire result when one readSet entry has a missing hash", () => {
+  it("drops a readSet entry with a missing hash", () => {
     const bad = { skillName: "git-hygiene", path: "SKILL.md", content: SKILL_MD_CONTENT };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [bad] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects the entire result when one readSet entry has a non-string content", () => {
+  it("drops a readSet entry with a non-string content", () => {
     const bad = { skillName: "git-hygiene", path: "SKILL.md", content: 42, hash: SHA256_SKILL_MD };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [bad] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects the entire result when one readSet entry has a non-string hash", () => {
+  it("drops a readSet entry with a non-string hash", () => {
     const bad = { skillName: "git-hygiene", path: "SKILL.md", content: SKILL_MD_CONTENT, hash: 999 };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [bad] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
-  it("rejects the entire result when a readSet entry has an unknown key", () => {
+  it("drops a readSet entry with an unknown key (strict schema)", () => {
     const bad = { ...goodEntry, secret: "should-not-be-here" };
     const r = parseReviewResult(
       raw(doc({ operations: [validPatchOp], readSet: [bad] })),
     );
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
+  });
+
+  it("drops string entries in readSet (model listing skill URIs as strings)", () => {
+    const r = parseReviewResult(
+      raw(doc({ operations: [validPatchOp], readSet: ["skill://git-hygiene", "skill://eng-standards"] as any })),
+    );
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
   });
 
   it("never exposes an unverifiable readSet entry", () => {
@@ -764,8 +778,9 @@ describe("secret-safe error messages (lastParseError)", () => {
 
   it("does not leak readSet file content or its secret into lastParseError", () => {
     const sensitiveContent = `top-secret-token: ${SECRET}`;
-    // Shape failure (missing hash field) is the rejection path; the reason must
-    // stay structural and never echo the payload.
+    // A bad-shape readSet entry is silently dropped; the batch is accepted with
+    // an empty readSet. lastParseError is null on the success path, so the
+    // sensitiveContent is never surfaced regardless.
     const d = doc({
       operations: [validPatchOp],
       readSet: [
@@ -777,9 +792,20 @@ describe("secret-safe error messages (lastParseError)", () => {
       ],
     });
     const r = parseReviewResult(raw(d));
-    expect(r).toBeNull();
+    expect(r).not.toBeNull();
+    expect(r!.readSet).toEqual([]);
+    // On success, lastParseError is null — assertSecretSafe accepts null.
+    expect(lastParseError).toBeNull();
+    expect(String(lastParseError ?? "")).not.toContain(sensitiveContent);
+
+    // Also verify: a document that DOES fail (unknown field + secret payload)
+    // does not echo the secret into lastParseError.
+    const failDoc = { ...d, unknownField: `extra-secret: ${SECRET}` };
+    const r2 = parseReviewResult(raw(failDoc));
+    expect(r2).toBeNull();
     assertSecretSafe(lastParseError);
     expect(lastParseError).not.toContain(sensitiveContent);
+    expect(lastParseError).not.toContain(SECRET);
   });
 
   it("accepts a batch whose readSet is omitted entirely", () => {
