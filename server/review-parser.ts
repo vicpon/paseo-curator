@@ -51,11 +51,13 @@ const parsedDocSchema = z
     summary: z.string().min(1),
     outcome: ReviewOutcomeSchema,
     operations: z.array(SkillOperationSchema).max(MAX_OPERATIONS),
-    // Advisory only. The authoritative read-before-write proof is the locked
-    // filesystem snapshot taken inside SkillManager.applyBatch; a model that
-    // paraphrases or truncates a long SKILL.md (which the read tools do) must
-    // not doom an otherwise valid batch.
-    readSet: z.array(readSetEntrySchema).optional(),
+    // Advisory only. Accept any array value (strings, objects, mixed) so a
+    // model that adapts by listing skill URIs as strings rather than full
+    // ReadSetEntry objects does not cause a schema rejection. Non-object
+    // entries and self-inconsistent entries are silently dropped before the
+    // result is returned; the locked filesystem snapshot in SkillManager is
+    // the authoritative read-before-write proof.
+    readSet: z.array(z.unknown()).optional(),
   })
   .strict();
 
@@ -280,11 +282,16 @@ export function parseReviewResult(
     return null;
   }
 
-  // Read-set is advisory: normalize each entry's hash to its own content so a
-  // downstream consumer can never trust a model-supplied digest it did not
-  // verify. A self-inconsistent entry is dropped, not fatal — the batch's real
-  // safety comes from the locked snapshot in SkillManager.
-  const readSet = (result.data.readSet ?? []).flatMap((entry) => {
+  // Read-set is advisory: drop non-object entries (a model that adapts to the
+  // "don't supply hashes" prompt by listing skill URIs as strings is still
+  // valid), then drop entries whose hash does not match their own content.
+  // The locked filesystem snapshot in SkillManager is the authoritative
+  // read-before-write proof; nothing here affects write safety.
+  const readSet = (result.data.readSet ?? []).flatMap((raw) => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+    const parsed = readSetEntrySchema.safeParse(raw);
+    if (!parsed.success) return [];
+    const entry = parsed.data;
     const actual = sha256(entry.content);
     return actual === entry.hash
       ? [{ skillName: entry.skillName, path: entry.path, content: entry.content, hash: actual }]
