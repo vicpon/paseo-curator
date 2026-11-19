@@ -2,8 +2,8 @@
   "id": "curator",
   "name": "Curator",
   "description": "Automatic guarded skill learning from completed Paseo turns",
-  "$comment": "Daemon-side Paseo plugin with source-timeline activity cards for applied and failed reviews.",
   "media": [],
+  "build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]],
   "requirements": {
     "paseo": ">=0.16.0-beta.2"
   }
