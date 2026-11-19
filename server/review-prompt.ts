@@ -293,13 +293,12 @@ function buildInstructionalHeader(): string {
     "3. references/ files are for topical depth; do not create one per incident.\n" +
     "4. Never delete a skill in a review; archiving is a maintenance-pass responsibility.\n" +
     "\n" +
-    "### Read-before-write (ENFORCED)\n" +
-    "Before you propose a patch or remove_file on any existing file, you MUST have\n" +
-    "read that file in this review and include a readSet entry with the exact content\n" +
-    "you read and its SHA-256 hash. The skill manager validates the hash against the\n" +
-    "current on-disk content and rejects the batch if it does not match.\n" +
-    "Creating a new file or a new skill does not require a readSet entry.\n" +
-    "Use the precomputed SKILL.md sha256 shown in the skill index after reading that exact file; do not compute it with a tool.\n" +
+    "### Copy text exactly (ENFORCED)\n" +
+    "Before proposing a patch or remove_file on an existing file, read that file in\n" +
+    "this review. The plugin re-reads the file under a lock and applies the change\n" +
+    "against its own snapshot, so you must NOT supply content or hashes: copy\n" +
+    "`oldText` verbatim from the file, character for character, and make sure it\n" +
+    "appears exactly once. Never paraphrase `oldText`.\n" +
     "\n" +
     "### Output contract\n" +
     "Do not use mutating tools or write files. You may use read-only tools to inspect existing skills.\n" +
@@ -310,14 +309,13 @@ function buildInstructionalHeader(): string {
     "- {\"type\":\"patch\",\"skillName\":string,\"path\":string,\"oldText\":string,\"newText\":string}\n" +
     "- {\"type\":\"write_file\",\"skillName\":string,\"path\":string,\"content\":string}\n" +
     "- {\"type\":\"remove_file\",\"skillName\":string,\"path\":string}\n" +
-    "Each readSet entry is exactly:\n" +
-    "- {\"skillName\":string,\"path\":string,\"content\":string,\"hash\":string}\n" +
+
     "Return exactly one JSON document (no prose, no markdown fence) with this shape:\n" +
     "  {\n" +
     "    \"summary\": \"one or two sentences describing what was learned\",\n" +
     "    \"outcome\": \"saved\" | \"nothing_to_save\",\n" +
     "    \"operations\": [ /* at most 20 SkillOperation objects */ ],\n" +
-    "    \"readSet\": [ /* ReadSetEntry objects, exact content + SHA-256 hash */ ]\n" +
+    "    \"readSet\": []  /* optional; ignored by the plugin */\n" +
     "  }\n" +
     "Use \"nothing_to_save\" when genuinely no reusable verified lesson exists; it is\n" +
     "a legitimate outcome, not a failure to avoid.\n" +

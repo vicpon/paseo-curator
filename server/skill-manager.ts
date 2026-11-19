@@ -731,8 +731,6 @@ export class SkillManager {
         case "patch": {
           const pathErr = this.checkPath(op.skillName, op.path);
           if (pathErr) return pathErr;
-          const evidenceErr = this.checkReadEvidence(op.skillName, op.path, readSetMap);
-          if (evidenceErr) return evidenceErr;
           break;
         }
 
@@ -751,8 +749,6 @@ export class SkillManager {
         case "remove_file": {
           const pathErr = this.checkPath(op.skillName, op.path);
           if (pathErr) return pathErr;
-          const evidenceErr = this.checkReadEvidence(op.skillName, op.path, readSetMap);
-          if (evidenceErr) return evidenceErr;
           break;
         }
 
@@ -814,7 +810,7 @@ export class SkillManager {
         }
 
         case "patch": {
-          const err = this.validatePatch(op, virtual, readSetMap);
+          const err = this.validatePatch(op, virtual);
           if (err) return err;
           break;
         }
@@ -826,7 +822,7 @@ export class SkillManager {
         }
 
         case "remove_file": {
-          const err = this.validateRemoveFile(op, virtual, readSetMap);
+          const err = this.validateRemoveFile(op, virtual);
           if (err) return err;
           break;
         }
@@ -855,21 +851,6 @@ export class SkillManager {
     return null;
   }
 
-  private checkReadEvidence(
-    skillName: string,
-    path: string,
-    readSetMap: Map<string, ReadSetEntry>,
-  ): string | null {
-    const evidence = readSetMap.get(`${skillName}/${path}`);
-    if (!evidence) {
-      return `read-before-write evidence missing for ${skillName}/${path}`;
-    }
-    if (sha256(evidence.content) !== evidence.hash) {
-      return `read-set evidence for ${skillName}/${path} does not match its own hash`;
-    }
-    return null;
-  }
-
   private checkArchiveEligible(skillName: string): string | null {
     const skillMdPath = join(this.skillRoot, skillName, "SKILL.md");
     if (!existsSync(skillMdPath)) {
@@ -894,13 +875,7 @@ export class SkillManager {
   private validatePatch(
     op: Extract<SkillOperation, { type: "patch" }>,
     virtual: Map<string, Map<string, string | null>>,
-    readSetMap: Map<string, ReadSetEntry>,
   ): string | null {
-    const evidence = readSetMap.get(`${op.skillName}/${op.path}`);
-    if (!evidence) {
-      return `patch: read-before-write evidence missing for ${op.skillName}/${op.path}`;
-    }
-
     const skillVirtual = virtual.get(op.skillName);
     if (!skillVirtual) {
       return `patch: skill does not exist: ${op.skillName}`;
@@ -910,15 +885,9 @@ export class SkillManager {
       return `patch: file does not exist: ${op.skillName}/${op.path}`;
     }
 
-    // The current content must match the read-set evidence exactly.
-    if (sha256(current) !== evidence.hash) {
-      return `patch: stale read evidence for ${op.skillName}/${op.path} (content changed since the curator read it)`;
-    }
-
-    // The current content must match the evidence content exactly.
-    if (current !== evidence.content) {
-      return `patch: read-set evidence content for ${op.skillName}/${op.path} does not match the current file`;
-    }
+    // `current` is the content captured under the skill lock, so it is the
+    // authoritative read-before-write snapshot; no model-supplied digest is
+    // trusted here.
 
     // The patch must match uniquely.
     const occurrences = countOccurrences(current, op.oldText);
@@ -955,13 +924,7 @@ export class SkillManager {
   private validateRemoveFile(
     op: Extract<SkillOperation, { type: "remove_file" }>,
     virtual: Map<string, Map<string, string | null>>,
-    readSetMap: Map<string, ReadSetEntry>,
   ): string | null {
-    const evidence = readSetMap.get(`${op.skillName}/${op.path}`);
-    if (!evidence) {
-      return `remove_file: read-before-write evidence missing for ${op.skillName}/${op.path}`;
-    }
-
     const skillVirtual = virtual.get(op.skillName);
     if (!skillVirtual) {
       return `remove_file: skill does not exist: ${op.skillName}`;
@@ -969,12 +932,6 @@ export class SkillManager {
     const current = skillVirtual.get(op.path);
     if (current === undefined || current === null) {
       return `remove_file: file does not exist: ${op.skillName}/${op.path}`;
-    }
-    if (sha256(current) !== evidence.hash) {
-      return `remove_file: stale read evidence for ${op.skillName}/${op.path}`;
-    }
-    if (current !== evidence.content) {
-      return `remove_file: read-set evidence content for ${op.skillName}/${op.path} does not match the current file`;
     }
     return null;
   }

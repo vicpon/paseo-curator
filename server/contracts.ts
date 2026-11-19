@@ -220,7 +220,7 @@ export type QueueRecord = z.infer<typeof QueueRecordSchema>;
 // ---------------------------------------------------------------------------
 
 /** The result of the skill manager applying (or rejecting) one batch. */
-export const AuditOutcomeSchema = z.enum(["applied", "rejected"]);
+export const AuditOutcomeSchema = z.enum(["applied", "rejected", "nothing_to_save"]);
 export type AuditOutcome = z.infer<typeof AuditOutcomeSchema>;
 
 /**
