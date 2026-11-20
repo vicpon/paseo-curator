@@ -70,6 +70,14 @@ interface FakeWaitForFinishResult {
 }
 
 /** Minimal PaseoApi surface the adapter is allowed to touch. */
+interface FakePaseoApiProviders {
+  waitForReady(options?: { timeoutMs?: number }): Promise<{
+    providers: Array<{ id: string; available: boolean }>;
+  }>;
+  listModes(provider: string): Promise<{ modes: Array<{ id: string; label: string }> }>;
+  listModels(provider: string): Promise<{ models: Array<{ id: string; label: string; isDefault?: boolean }> }>;
+}
+
 interface FakePaseoApi {
   agents: {
     ref(id: string): {
@@ -79,6 +87,7 @@ interface FakePaseoApi {
     };
     create(options: FakeCreateOptions): Promise<FakeAgentHandle>;
   };
+  providers?: FakePaseoApiProviders;
 }
 
 interface FakeTimelineEntry {
@@ -999,13 +1008,13 @@ describe("runCurator", () => {
     expect(createCalls[0]!.config.provider).toBe(AGENT_PROVIDER);
   });
 
-  it("rejects a bare provider with no model as source-model-unavailable before any create", async () => {
+  it("rejects a bare provider with no model as source-model-unavailable when no fallback is available", async () => {
     const { paseo, createCalls } = makeFakeCreate({
       kind: "ok",
       agentId: CURATOR_AGENT_ID,
       waitResult: idleWaitResult("ok"),
     });
-
+    // No providers API → no fallback → source-model-unavailable
     const adapter = new PaseoAdapter(paseo);
     const promise = adapter.runCurator(
       { ...snapshot("omp"), model: null },
@@ -1015,5 +1024,61 @@ describe("runCurator", () => {
     await expect(promise).rejects.toThrow(/source-model-unavailable/);
     await expect(promise).rejects.not.toThrow(PROMPT);
     expect(createCalls).toHaveLength(0);
+  });
+
+  it("falls back to discovered omp/model when source provider create fails", async () => {
+    let createCount = 0;
+    const FALLBACK_MODEL = "omp/fallback-model-123";
+    const paseo: FakePaseoApi = {
+      agents: {
+        ref: () => { throw new Error("must not ref"); },
+        create: async (options: FakeCreateOptions) => {
+          createCount++;
+          if (createCount === 1) throw new Error("provider rejected");
+          return {
+            id: options.agentId,
+            waitForFinish: async () => idleWaitResult("saved outcome"),
+          };
+        },
+      },
+      providers: {
+        waitForReady: async () => ({ providers: [{ id: "omp", available: true }] }),
+        listModes: async () => ({ modes: [{ id: "ask", label: "Always Ask" }] }),
+        listModels: async () => ({ models: [{ id: "fallback-model-123", label: "Fallback", isDefault: true }] }),
+      },
+    };
+
+    const adapter = new PaseoAdapter(paseo as any);
+    const result = await adapter.runCurator(
+      { id: "agent-hermes", provider: "hermes/zai:glm-5.3", cwd: "/tmp" },
+      "turn-fb",
+      PROMPT,
+    );
+    expect(result.finalText).toBe("saved outcome");
+    expect(createCount).toBe(2);
+  });
+
+  it("caches fallback discovery and does not re-query on subsequent failures", async () => {
+    let discoveryCalls = 0;
+    const paseo: FakePaseoApi = {
+      agents: {
+        ref: () => { throw new Error("must not ref"); },
+        create: async (options: FakeCreateOptions) => {
+          if (options.config.provider.startsWith("hermes")) throw new Error("rejected");
+          return { id: options.agentId, waitForFinish: async () => idleWaitResult("ok") };
+        },
+      },
+      providers: {
+        waitForReady: async () => { discoveryCalls++; return { providers: [{ id: "omp", available: true }] }; },
+        listModes: async () => ({ modes: [{ id: "ask", label: "Always Ask" }] }),
+        listModels: async () => ({ models: [{ id: "model-x", label: "X", isDefault: true }] }),
+      },
+    };
+
+    const adapter = new PaseoAdapter(paseo as any);
+    // Two reviews from hermes agents — discovery should only run once
+    await adapter.runCurator({ id: "a1", provider: "hermes/zai:glm-5.3", cwd: "/tmp" }, "t1", PROMPT);
+    await adapter.runCurator({ id: "a2", provider: "hermes/zai:glm-5.3", cwd: "/tmp" }, "t2", PROMPT);
+    expect(discoveryCalls).toBe(1);
   });
 });

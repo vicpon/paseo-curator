@@ -47,6 +47,17 @@ export interface PaseoApiRef {
     };
     readonly create: (options: CreateAgentOptions) => Promise<AgentHandle>;
   };
+  readonly providers?: {
+    readonly waitForReady: (options?: { timeoutMs?: number }) => Promise<{
+      readonly providers: ReadonlyArray<{ readonly id: string; readonly available: boolean }>;
+    }>;
+    readonly listModes: (provider: string) => Promise<{
+      readonly modes: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+    }>;
+    readonly listModels: (provider: string) => Promise<{
+      readonly models: ReadonlyArray<{ readonly id: string; readonly label: string; readonly isDefault?: boolean }>;
+    }>;
+  };
 }
 
 /** A single agent snapshot with the fields the adapter captures. */
@@ -257,9 +268,65 @@ function formatToolCall(
  * reports no older pages.
  */
 export class PaseoAdapter {
+  /** Cached fallback provider/model selection for non-creatable source providers. */
+  private fallbackProviderSelection: string | null | undefined = undefined;
+
   constructor(
     private readonly paseo: PaseoApiRef,
   ) {}
+
+  /**
+   * Discover a fallback provider/model to use when the source agent's
+   * provider cannot create a daemon-side curator agent. Prefers `omp` with
+   * `ask` mode (the only provider+mode combination verified to work for
+   * curator use). Returns null when no suitable provider is found, and caches
+   * the result so discovery only runs once per adapter lifetime.
+   */
+  private async discoverFallbackProvider(): Promise<{ providerSelection: string; modeId: string } | null> {
+    if (this.fallbackProviderSelection !== undefined) {
+      return this.fallbackProviderSelection === null
+        ? null
+        : { providerSelection: this.fallbackProviderSelection, modeId: "ask" };
+    }
+
+    if (!this.paseo.providers) {
+      this.fallbackProviderSelection = null;
+      return null;
+    }
+
+    try {
+      // Preference: omp with ask mode — the only combination we have verified
+      // works for background curator agents in production.
+      const PREFERRED: Array<{ provider: string; modeId: string }> = [
+        { provider: "omp", modeId: "ask" },
+      ];
+
+      const snap = await this.paseo.providers.waitForReady({ timeoutMs: 10_000 });
+      const availableIds = new Set(
+        snap.providers.filter(p => p.available).map(p => p.id),
+      );
+
+      for (const { provider, modeId } of PREFERRED) {
+        if (!availableIds.has(provider)) continue;
+        try {
+          const models = await this.paseo.providers.listModels(provider);
+          const model =
+            models.models.find(m => m.isDefault)?.id ?? models.models[0]?.id;
+          if (!model) continue;
+          const selection = `${provider}/${model}`;
+          this.fallbackProviderSelection = selection;
+          return { providerSelection: selection, modeId };
+        } catch {
+          // provider listed as available but listModels failed — skip it
+        }
+      }
+    } catch {
+      // providers API unavailable — treat as no fallback
+    }
+
+    this.fallbackProviderSelection = null;
+    return null;
+  }
 
   async listLoadedSkillNames(agentId: string): Promise<string[]> {
     const commands = this.paseo.agents.ref(agentId).commands;
@@ -510,24 +577,35 @@ export class PaseoAdapter {
     // splits on the first slash), while daemon snapshots carry the bare
     // provider id and the model separately. Compose the selection: a provider
     // that already includes a slash passes through; otherwise the snapshot's
-    // model is appended. With neither form available the run cannot specify a
-    // route, so it fails with a bounded category instead of a create call
-    // that is guaranteed to be rejected.
+    // model is appended. With neither form available, try the discovered
+    // fallback before giving up.
     let providerSelection = sourceAgent.provider.trim();
     if (!providerSelection.includes("/")) {
       const model = sourceAgent.model?.trim() ?? "";
-      if (model.length === 0) {
-        unregisterCurator();
-        throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
+      if (model.length > 0) {
+        providerSelection = `${providerSelection}/${model}`;
+      } else {
+        // No model in snapshot — go straight to fallback if available.
+        const fallback = await this.discoverFallbackProvider();
+        if (fallback === null) {
+          unregisterCurator();
+          throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
+        }
+        providerSelection = fallback.providerSelection;
       }
-      providerSelection = `${providerSelection}/${model}`;
     }
 
     let handle: AgentHandle;
-    try {
-      handle = await this.paseo.agents.create({
+    // modeId for the initial attempt: "ask" is known to work for omp. For
+    // other providers it may not exist; the fallback path uses the discovered
+    // mode.
+    let modeId: string | undefined = "ask";
+    let usedFallback = false;
+
+    const tryCreate = async (): Promise<AgentHandle> => {
+      return this.paseo.agents.create({
         agentId,
-        config: { provider: providerSelection, modeId: "ask" },
+        config: { provider: providerSelection, modeId },
         cwd: sourceAgent.cwd,
         parent: sourceAgent.id,
         prompt,
@@ -537,10 +615,34 @@ export class PaseoAdapter {
         labels,
         metadata,
       });
+    };
+
+    try {
+      handle = await tryCreate();
       if (handle.id !== agentId) throw new Error("curator identity mismatch");
     } catch {
-      unregisterCurator();
-      throw curatorError(sourceAgent.id, turnId, "create-failed");
+      // First attempt failed. Try the fallback provider if we haven't already.
+      if (!usedFallback) {
+        const fallback = await this.discoverFallbackProvider();
+        if (fallback !== null && fallback.providerSelection !== providerSelection) {
+          providerSelection = fallback.providerSelection;
+          modeId = fallback.modeId;
+          usedFallback = true;
+          try {
+            handle = await tryCreate();
+            if (handle.id !== agentId) throw new Error("curator identity mismatch");
+          } catch {
+            unregisterCurator();
+            throw curatorError(sourceAgent.id, turnId, "create-failed");
+          }
+        } else {
+          unregisterCurator();
+          throw curatorError(sourceAgent.id, turnId, "create-failed");
+        }
+      } else {
+        unregisterCurator();
+        throw curatorError(sourceAgent.id, turnId, "create-failed");
+      }
     }
 
     let result: WaitForFinishResult;
