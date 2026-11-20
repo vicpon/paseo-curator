@@ -1042,8 +1042,8 @@ describe("runCurator", () => {
       },
       providers: {
         waitForReady: async () => ({ providers: [
-          { id: "claude", available: true },
           { id: "codex", available: true },
+          { id: "claude", available: true },
         ] }),
         listModes: async () => ({ modes: [{ id: "plan", label: "Plan Mode (Always Ask)" }] }),
         listModels: async (provider: string) => ({ models: [{ id: `${provider}-default-model`, label: "Default", isDefault: true }] }),
