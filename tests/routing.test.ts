@@ -23,9 +23,9 @@ describe("provider routing discovery", () => {
     const first = await discoverRoutingProviders(api);
     api.waitForReady.mockResolvedValue(routingSnapshot([...entries].reverse()));
     expect(await discoverRoutingProviders(api)).toEqual(first);
-    expect(first.map(p => p.id).sort()).toEqual(entries.map(p => p.provider).sort());
+    expect(first.map(p => p.id).sort()).toEqual(entries.filter(p => p.enabled).map(p => p.provider).sort());
     expect(first.find(p => p.id === "claude")?.supported).toBe(true);
-    expect(first.find(p => p.id === "codex")).toMatchObject({ supported: false, reason: "Disabled in host settings." });
+    expect(first.find(p => p.id === "codex")).toBeUndefined();
     expect(first.find(p => p.id === "future")?.supported).toBe(false);
   });
 });
@@ -63,16 +63,41 @@ describe("authenticated daemon protocol regression", () => {
       waitForReady: async () => liveSnapshot,
       listModels: async (provider: string) => ({ models: [{ id: (provider === "claude" ? claudeControls : codexControls).draft.provider.split("/").slice(1).join("/"), label: "Default", provider }], provider, fetchedAt: liveSnapshot.generatedAt, requestId: "models" }),
       listControls: vi.fn(async (draft: Parameters<NonNullable<RoutingProviders["listControls"]>>[0]) => {
+        if (draft.provider.startsWith("opencode/")) return routingControls(draft);
         const capture = draft.provider.startsWith("claude/") ? claudeControls : codexControls;
         expect(draft).toEqual({ ...capture.draft, cwd: "." });
         return capture.result;
       }),
     };
     const catalog = await discoverRoutingProviders(api);
-    expect(catalog.filter(entry => entry.supported).map(entry => entry.id)).toEqual(["claude", "codex"]);
-    for (const provider of ["omp", "hermes", "opencode", "glm-acp-agent"]) {
+    expect(catalog.filter(entry => entry.supported).map(entry => entry.id)).toEqual(["claude", "codex", "opencode"]);
+    for (const provider of ["omp", "hermes", "glm-acp-agent"]) {
       expect(catalog.find(entry => entry.id === provider)).toMatchObject({ supported: false, reason: expect.not.stringContaining("Unavailable on this host") });
     }
-    expect(api.listControls).toHaveBeenCalledTimes(2);
+    expect(api.listControls).toHaveBeenCalledTimes(3);
+  });
+});
+
+
+describe("enabled-only catalog and tool-less routing", () => {
+  it("omits disabled host entries entirely and does not discover their models", async () => {
+    const api = providers();
+    const catalog = await discoverRoutingProviders(api);
+    expect(catalog.map(p => p.id)).not.toContain("codex");
+    expect(api.listModels).not.toHaveBeenCalledWith("codex");
+    expect(catalog.find(p => p.id === "omp")).toMatchObject({ available: true, supported: false });
+    expect(catalog.find(p => p.id === "hermes")).toMatchObject({ available: false });
+  });
+  it("supports OpenCode through native wildcard deny, including extension tools", async () => {
+    expect(await resolveReadOnlyConfig(providers(), "opencode/vendor/model", "/repo")).toEqual({
+      provider: "opencode/vendor/model", options: { permission: "deny", auto_accept: false }, toolPolicy: { preapproved: [] },
+    });
+  });
+  it("rejects a stripped wildcard deny or auto-accept override", async () => {
+    const api = providers();
+    for (const options of [{ permission: "ask", auto_accept: false }, { permission: "deny", auto_accept: true }]) {
+      api.listControls.mockResolvedValue({ ...codexControls.result, options });
+      expect(await resolveReadOnlyConfig(api, "opencode/model", "/repo")).toBeNull();
+    }
   });
 });

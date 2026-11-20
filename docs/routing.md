@@ -1,138 +1,144 @@
-# Provider routing controls and acceptance
+# Curator routing: controls and verification
 
-Curator discovers providers from the selected host's SDK `providers.waitForReady().entries`.
-Provider IDs, enabled flags, availability and labels come from that catalog; neither discovery
-order nor a preferred provider chooses a route. Native confinement has small provider-specific
-adapters. Unknown families remain visible and unavailable until their controls are verified.
-No mode label is evidence of safety.
+## Current contract
 
-## Live discovery correction (PR7)
+PR7 discovers the authenticated host SDK catalog (`entries`, `provider`, `enabled`,
+`status: "ready"`). Only enabled entries are returned, listed, or offered as providers.
+A provider's host availability is separate from whether Curator can enforce its safety policy.
+A ready family without supported controls says **Ready; review blocked**, with a reason.
+A failed refresh clears stale ready rows and provider choices.
 
-On 2026-11-20, an authenticated SDK connection to the existing desktop-managed Paseo
-0.17.0-beta.1 daemon returned `status: "ready"` for Claude, Codex, OMP, OpenCode,
-Hermes and GLM. The shipped CLI's `provider/ls.js` projects `"ready"` to `"available"`;
-that display value is not the SDK contract. Both settings discovery and the adapter's
-pre-create availability check must require `enabled && status === "ready"`.
+Source reviews retain the exact provider/model, including nested model IDs. Fallback is only
+the explicitly saved provider/model; **None is the default**. No provider preference order is
+used. A selected provider disabled or removed at the host disappears from the list and menu;
+the saved consent stays unchanged and the UI shows a generic inactive selection. It never
+silently saves None or another provider. None remains usable while discovery is pending.
 
-`RoutingProviders` now picks methods from the pinned SDK's `PaseoProviderActions`,
-including the actual snapshot, model and control result types. The client is an explicit
-build-time dependency; its type-only import adds no runtime module load. Regression
-fixtures in `tests/routing-fixtures.ts` project the authenticated snapshot's catalog fields
-and preserve real control response envelopes. Optional large model/icon/compact payloads
-are omitted. The discovery regression returned zero supported providers before the fix;
-11 adapter tests also failed when their fixtures were corrected to `"ready"`.
+The adapter resolves native options with `providers.listControls` for the selected route and
+cwd, then checks enabled/ready status and explicit fallback consent again before create.
+Missing, stripped or erroring controls fail closed. A provider disabled during resolution
+cannot trigger a create-failure fallback to another provider. These checks cannot be atomic
+with the host's subsequent create; already submitted prompts cannot be recalled.
 
-Authenticated `listControls` calls verified the SDK input is
-`{provider: "family/model", cwd, providerOptions}` and the result carries effective
-`options`, `provider`, `controls`, `error`, `fetchedAt` and `requestId`. Claude retained
-`extraArgs.tools`, `allowedTools` and `disallowedTools`; Codex retained `sandbox_mode`
-and `approval_policy`. The existing request/response handling is correct. Model discovery
-and control resolution do not launch a review or establish live write-confinement proof.
-Unsupported families still fail closed with their safety reason, and fallback consent is
-still explicit. Native screenshot and exact deployed-revision evidence are recorded on PR7
-following tests, branch push, and an authorized curator-only reload; no daemon restart is needed.
+Reviewer identity includes route, native policy, source turn and queue attempt. IDs are
+registered before asynchronous creation. The permission guard denies approval-gated requests
+for those IDs; it is defense in depth, not proof that native tools are confined.
+Plugin-owned pre-review versions and apply-time claim fencing remain authoritative. Model
+`readSet` is advisory; plugin code applies and audits validated proposals.
 
-## Routing contract
+## Supported family matrix
 
-1. Keep the exact source provider/model (including nested model IDs) if it is enabled,
-   available and has verified native controls. Never substitute a source model's default.
-2. Otherwise, only an explicitly saved fallback provider can receive the review. None is
-   the default. A pinned fallback model must still exist; an unset model follows the explicitly
-   chosen provider's default, then its first advertised model. There is no provider preference order.
-3. Resolve native options with `providers.listControls` for the exact route and cwd; require
-   the effective options to retain the required restrictions. Missing API, error or stripped
-   options fails closed. Create passes SDK `config.options`, not daemon `providerOptions` or
-   invented session mode IDs. Empty tool-policy preapprovals grant no extra MCP tools.
-4. Recheck enabled/available status and provider/model consent immediately before create.
-   Changing, clearing, invalidating or failing to read settings cancels the pending fallback.
-   Already submitted requests cannot be recalled. No provider/model catalog refresh saves settings.
-5. Route and policy participate in reviewer identity, alongside the source turn and review
-   attempt. Plugin-owned pre-review snapshots and apply-time claim/version fencing are unchanged.
+Observed host: desktop-managed Paseo **0.17.0-beta.1**, Linux, 2026-11-20. Pinned plugin/client
+SDK: 0.16.0-beta.2. Availability alone does not prove authentication or a successful request.
 
-## Original acceptance matrix (before live discovery correction)
-
-Observed host: desktop-managed Paseo 0.16.2, standard `paseo provider ls --json`, 2026-11-20.
-The installed SDK is `@getpaseo/client`/`plugin`/`protocol` 0.16.0-beta.2. No daemon was started,
-plugin reloaded, or live installed checkout edited. Availability is discovery, not authentication
-or a successful model request.
-
-| Route family | Observed catalog | Curator safety policy | Validation / limitation |
+| Family | Host | Curator native policy | Actual live result |
 |---|---|---|---|
-| Codex | Enabled, available; modes Default Permissions, Auto-review, Full Access | `options: {sandbox_mode: "read-only", approval_policy: "never"}` | Adapter tests assert native options with no `modeId`; source/provider forwarding inspected. No live write-confinement probe. |
-| Claude | Enabled, available | `extraArgs.tools: "Read,Glob,Grep"`, corresponding `allowedTools`, `disallowedTools: ["mcp__*"]` | Native built-in tool restriction plus all MCP tools denied; allowedTools alone is not an allowlist. Adapter tests cover source and explicit fallback. No live write-confinement probe. |
-| OMP | Enabled, available | Disabled | Host only exposes approval modes (`full`, `write`, `ask`) and session/model/runtime options, not native tool filtering or a read-only sandbox. Upstream must expose and enforce a native allowlist/sandbox, including custom tools, before this route can run. |
-| OpenCode | Enabled, available | Disabled | Host supports scalar deny-all or a strict fixed-key permission object. Deny-all also prevents required skill reads; enumerating native write permissions leaves extension tools unconfined. Upstream needs a deny-by-default read-tool allowlist covering extension/MCP tools. |
-| Hermes | Enabled, available, ACP | Disabled | Host ACP route exposes session modes, not a verified read-only toolset or sandbox control. Hermes modes are Default, Accept Edits, Don't Ask. Its approval bridge is for dangerous commands, not every native mutation. Upstream needs an enforceable per-session toolset/sandbox control through ACP/Paseo. |
-| GLM ACP | Enabled, available | Disabled | No verified native confinement contract; ask/auto/bypass labels are insufficient. |
-| Copilot, Pi, Antigravity, Muse, Qwen Code | Disabled, unavailable | Disabled | Catalog entries retained with disabled/unavailable reason. |
-| New/custom provider | Host catalog decides | Disabled until native policy verified | Its ID can persist in settings without becoming an authorized runnable route. |
+| Codex | Enabled / ready | `sandbox_mode: "read-only"`, `approval_policy: "never"` | `codex/gpt-6.2-sol`: real source and review completed; disposable SQLite queue/audit `nothing_to_save`, one attempt, zero operations. Canary unchanged. Model reported edit and shell sandbox denials, but the host returned projected history without those tool events; do not treat that report alone as independent execution-denial proof. |
+| Claude | Enabled / ready | `extraArgs.tools: "Read,Glob,Grep"`, matching `allowedTools`, `disallowedTools: ["mcp__*"]` | `claude/claude-haiku-4-5`: real source/review completed; SQLite `nothing_to_save`, one attempt, zero operations. Native Write call failed with “No such tool available: Write”; canary unchanged. Model reported no shell tool. |
+| OpenCode | Enabled / ready | `permission: "deny"`, `auto_accept: false`, empty MCP preapprovals | `opencode/openai/gpt-6.2-sol`: real source/review completed; SQLite `nothing_to_save`, one attempt, zero operations. Canary unchanged; reviewer reported no file-write/shell tools and made no overwrite attempt. This is not a forced extension-tool execution test. |
+| OMP | Enabled / ready | Review blocked | Current host cannot pass native tool filtering or a sandbox through its strict per-session options. `ask` alone is unsafe: installed native policy resolution honors explicit tool/user allows before its mode default. No unsafe inference was launched. |
+| Hermes | Enabled / ready, custom ACP | Review blocked | ACP launcher does not expose per-session native toolset filtering. Hermes reads ACP toolsets from its process configuration; its dangerous-command approval bridge does not cover every mutation. No unsafe inference was launched. |
+| GLM ACP | Enabled / ready, `glm-acp-agent@1.3.0` | Review blocked | Built-in writes/commands ask in default mode, but installed `sessionMcpTool` calls MCP without that gate. Session modes are not a universal native deny policy. No unsafe inference was launched. |
+| Pi | Disabled at host; omitted | No verified per-session native tool filter through this host | Host schema exposes only session/RPC/extension timeouts, not tool filtering. No inference launched. |
+| Copilot, Antigravity, Muse, Qwen | Disabled at host; omitted | Not evaluated for this change | No inference launched. |
+| New/custom family | Host catalog decides | Blocked until an enforceable policy is verified | An arbitrary saved provider ID does not authorize unrestricted creation. |
 
-Trusted daemon plugins, provider startup hooks and operator-managed external services remain
-part of the host trust boundary. These controls restrict reviewer native mutation tools, not
-the trusted Curator plugin that applies validated skill proposals. Codex filesystem sandboxing
-is not a sandbox for remote MCP services. The permission guard continues to deny approval-gated
-requests, but is not used as the sole proof of native write confinement.
+OpenCode's first advertised model, `openai/gpt-5.3-codex-spark`, returned a real unsupported-model
+account error. A separate explicitly selected `openai/gpt-6.2-sol` probe succeeded; Curator
+never silently substitutes that model in production. Pin a model supported by your account.
 
-## Verified implementation evidence
+## Tool-less skill context and data disclosure
 
-The shipped Paseo 0.16.2 `app.asar` provider option implementations were read directly,
-without executing the daemon. Upstream tag `v0.16.2` resolves to
-`2ee30f4164af42ba209236ab3a31bf9532592fc3`; its option schemas were also fetched from GitHub.
+OpenCode's wildcard deny also prevents skill reads. For this route only, Curator supplies
+exact file contents from the same plugin-owned pre-review capture used for stale-write checks.
+It adds at most **120,000 serialized characters**, with complete JSON file entries rather than
+truncating individual files. Hidden path components, replacement characters, and non-whitespace
+C0/C1 controls are omitted as common binary indicators. This heuristic is not a complete binary
+classifier or secret filter. Other routes do not receive this additional bundle, including
+when a failed source create is retried on a Claude/Codex fallback.
 
-- [Installed SDK contract](../shared/routing.ts) follows the installed client's `PaseoAgentConfig`
-  (`options`, `toolPolicy`) and `PaseoProviderActions` (`waitForReady`, `listControls`). The
-  actual snapshot shape is `entries: [{provider, status, enabled, ...}]`, not a guessed
-  `{providers: [{id, available}]}`. The SDK maps `config.options` to daemon `providerOptions`.
-- [Codex options](https://github.com/getpaseo/paseo/blob/2ee30f4164af42ba209236ab3a31bf9532592fc3/packages/server/src/server/agent/providers/codex/options.ts)
-  validates `sandbox_mode` and `approval_policy`. The [Codex agent](https://github.com/getpaseo/paseo/blob/2ee30f4164af42ba209236ab3a31bf9532592fc3/packages/server/src/server/agent/providers/codex-app-server-agent.ts)
-  forwards provider options into native thread configuration and preserves explicit sandbox
-  settings rather than substituting workspace-write mode presets.
-- [Claude options](https://github.com/getpaseo/paseo/blob/2ee30f4164af42ba209236ab3a31bf9532592fc3/packages/server/src/server/agent/providers/claude/options.ts)
-  accepts `extraArgs`, `allowedTools` and `disallowedTools`; [buildOptions](https://github.com/getpaseo/paseo/blob/2ee30f4164af42ba209236ab3a31bf9532592fc3/packages/server/src/server/agent/providers/claude/agent.ts)
-  passes them to the Claude Agent SDK. Installed `claude --help` documents `--tools` as the
-  built-in availability filter. [Anthropic's CLI reference](https://code.claude.com/docs/en/cli-reference)
-  and [SDK permissions](https://code.claude.com/docs/en/agent-sdk/permissions) document deny
-  globs, including `mcp__*`, and deny-rule precedence over hooks, allows and bypass mode.
-- [OMP schema and launch mapping](https://github.com/getpaseo/paseo/blob/2ee30f4164af42ba209236ab3a31bf9532592fc3/packages/server/src/server/agent/providers/omp/provider-config.ts)
-  only pass approval-mode flags and model roles. [OpenCode options and rules](https://github.com/getpaseo/paseo/blob/2ee30f4164af42ba209236ab3a31bf9532592fc3/packages/server/src/server/agent/providers/opencode/options.ts)
-  show the fixed permission keys and scalar wildcard deny. These are host API blockers,
-  not a statement that the underlying CLIs can never support read-only operation.
-- Hermes standard CLI diagnostic identifies `hermes acp`, successful ACP initialization,
-  three modes and 57 models; the version probe timed out. Local installed
-  `~/.hermes/hermes-agent/acp_adapter/modes.py`, `session.py` and `permissions.py` were inspected.
-  No model prompt was submitted. No claim of authenticated, completed Hermes review is made.
+Snapshot entries are explicitly untrusted data. JSON escaping prevents closing the prompt's
+data delimiter while preserving decoded content exactly, including `<`, `>` and `&`. The model
+must decode content before copying patch text. Omitted files cannot be inspected with tools
+on the tool-less route; the prompt tells the reviewer not to patch or remove them. The
+complete plugin capture, not model assertions about reading, remains the mutation/version proof.
 
-SHA-256 of the extracted installed JavaScript evidence (kept outside the repository):
-Claude options `d673c9227db4605221edd8aebafb0691ea53b638ec5189fc68a3247751b163d8`;
-Codex options `a6a5bdf3bff36fa624e28aad3a9b1bf3e7333f3b4ac6b813dec48159f03ed061`;
-OMP config `d8f07cfcd808c38a15dfd1a5b27f8958f03c1f97071c609c8f62872f9a146e43`;
-OpenCode options `bfcdb7ae324e810690d003253bbb49e5bb299a7ca8b4d2540e9488457d27219c`.
+The bounded source turn, skill index, captured skill text and read-tool results can contain
+file contents, credentials, secrets and personal data. Bounds and filters do **not** guarantee
+redaction. The chosen provider receives them under its data policy and the user's account.
+Trusted daemon plugins, launch hooks and provider extensions are part of the host trust boundary.
+These controls are not a sandbox for trusted plugin code or remote services.
 
-## Settings migration and UI validation
+## Proven host/API limits and next step
 
-Version 2 preserves explicit v1 Codex consent and defaults invalid legacy values to None.
-Current provider IDs are validated structurally, not against a provider enum. A fallback model
-requires a provider. Provider/model values survive discovery errors and refreshes; disappearing
-entries retain their saved values and fail closed at routing time. Host revision-based saves
-remain in use, so stale UI revisions cannot overwrite newer settings.
+The exact running AppImage's `app.asar` implementations were extracted read-only under
+`/tmp/curator-pr7-source` and inspected alongside the installed provider implementations:
 
-Automated regressions exercise discovery order, enabled filtering, unknown policies, native
-controls, exact nested source routes, explicit provider/model selection, pending revocation,
-missing/stripped controls, v1 migration, and settings UI interaction/refresh/error states.
-Existing stale-write, delete, claim-fencing and recovery regressions run in the full suite.
+- `agent/provider-registry.js`: `toolPolicy` support is exact MCP **preapproval** for
+  Claude/Codex/OpenCode. Other families reject it with `tool_policy_unsupported`. The protocol
+  schema contains only `preapproved`; an empty list neither disables native tools nor adds grants.
+- `providers/opencode/options.js`: scalar `permission: "deny"` becomes a wildcard
+  `permission: "*", pattern: "*", action: "deny"` rule. Legacy `opencode-agent.js` forwards it
+  into session create/resume; `opencode/v2/configuration.js` maps it to the v2 wildcard action.
+  Both paths preserve deny-all without enumerating a finite set of native/extension tool names.
+  `listControls` retains options; that response alone is not enforcement proof.
+- `providers/omp/provider-config.js` and `agent.js`: strict options are `fast_mode`, `sessionDir`,
+  `rpcTimeoutMs`, `smolModel`, `slowModel`, `planModel`. Launch modes supply approval flags and
+  model roles, not caller-supplied `--no-tools`/`--tools`. Installed OMP supports such CLI flags,
+  but Curator cannot request them through this per-session schema. Its installed approval
+  resolver permits explicit tool/user allows before falling back to `always-ask`.
+- `providers/pi/agent.js`: strict options are `sessionDir`, `rpcTimeoutMs`, `extensionTimeoutMs`.
+  Session-open tool contributions add host tools; they do not replace a provider's built-ins.
+- Installed Hermes `acp_adapter/session.py` resolves `platform_toolsets.acp` from process config;
+  `permissions.py` bridges dangerous-command approvals. Process-global config/profile rewriting
+  or a new isolated provider wrapper was not implemented or claimed safe in this scoped fix.
+- Installed GLM `dist/tools/executor.js` asks before `writeFile`/`runCommand` in default mode,
+  permits bypass/accept-edits modes, and executes session MCP tools without that check.
 
-Genuine browser screenshots were captured and inspected at 1280px and 375px widths using
-[the testable harness](../tests/ui/README.md), rendering the actual settings component with
-HTML host-control substitutes and clearly labeled catalog/model fixtures. Selection survived
-provider refresh and browser reload; 375px document width equaled its viewport width.
-[Desktop](screenshots/routing-harness-desktop.png) and [compact](screenshots/routing-harness-mobile.png) captures retain the fixture notice.
-This historical verification covered the browser harness only. Native Paseo UI, host settings persistence across
-plugin reloads, and end-to-end provider confinement were untested in that pass: `orca-ide` is absent,
-Paseo exposes no CDP port, and the user prohibited plugin reload/deployment. No native UI
-screenshot is claimed. Run `npm run preview:settings` to reproduce the testable artifact.
+A universal tool-less SDK session is **not currently exposed** by this host. The bounded
+upstream requirement is a validated per-session native-tool allowlist/deny-all option applied
+before tool registration and covering built-ins, extensions, MCP, delegation, create and resume.
+OMP/Pi can map it to their native tool controls; ACP integrations need an equivalent enforceable
+session control or a separately configured isolated no-tools provider. Launch environment/MCP
+injection alone is not that contract. This PR does not claim provider-agnostic completion.
 
-UAT after a separately authorized installation: open Settings → Plugins → Curator; confirm
-None default and the full provider status list, choose a supported provider and pin a model,
-refresh and reopen settings, then clear fallback. Verify source routing, explicit fallback,
-provider disablement and a pending consent revocation against disposable data before trusting
-live confinement. Do not use the browser fixture as evidence that a native provider denied writes.
+[Paseo's provider-options reference](https://paseo.sh/docs/sdk/provider-options.md) documents
+provider-specific option handling and merging. [OpenCode's permission reference](https://opencode.ai/docs/permissions/)
+describes wildcard rules; v1 and v2 use different field names, handled by the inspected bridge.
+
+## Reproducible verification and native UAT
+
+The real SDK probes used the existing authenticated local daemon, real source turns, the actual
+adapter/orchestrator/store/skill manager, and disposable cwd/skill roots and SQLite databases.
+Queue rows were explicitly enqueued in those disposable stores to avoid the normal ten-tool
+cadence. These are live provider runs, not tests of the installed plugin's production cadence.
+The permission guard was reviewed before inference; the external probe denied any approval
+requests for its own IDs. Only canary files in disposable roots were eligible write targets.
+Probe agents were archived afterward. No real skill-library writes were requested or applied.
+
+Evidence root: `/home/victor/.hermes/cache/scratch/curator-pr7-evidence/live-1795200580949`.
+Each family has `source-timeline.json`, `review-timeline.json`, `canary-timeline.json`,
+`config.json`, `canary.txt`, and `curator.sqlite`. `sqlite-readback.json` records read-only
+terminal queries of queue and audit rows. Native tool results take precedence over model prose.
+The daemon returned `projection: "projected"` even when canonical history was requested.
+
+Automated regressions cover enabled-only discovery/refresh/selector omission, inactive saved
+consent, no switch/send after disablement, late revocation, stripped native controls, exact
+nested models, snapshot exactness, bounded payloads, binary/hidden omission, and fallback retries
+in both directions. Existing filesystem/claim fencing and queue recovery checks remain in the
+full suite. Browser fixture captures in `docs/screenshots/routing-harness-*` are historical
+harness evidence and are not native UI evidence.
+
+Native UAT after the authorized exact-SHA checkout update and curator-only reload:
+
+1. Open native Settings → Plugins → Curator on host `vpc`.
+2. Verify only enabled families appear. Ready OMP/Hermes/GLM show review-blocked safety reasons;
+   Codex/Claude/OpenCode show their policies. Disabled Pi/Copilot/etc. are absent.
+3. Open fallback menu: None and supported enabled routes only. None remains the saved default.
+4. Refresh: selection is preserved without a settings save. A host-disabled saved route is
+   omitted from the menu; its generic inactive placeholder cannot authorize another route.
+5. Clear to None to revoke fallback. Already transmitted reviews cannot be recalled.
+
+The installed checkout is updated only after push, detached at the exact PR head, preserving
+untracked files. Only curator is reloaded; the existing daemon is never restarted. Native
+screenshots and the exact revision/CI result are recorded on PR7. Do not merge this PR.

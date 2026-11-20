@@ -2,7 +2,7 @@ import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { buildToolCallDisplayModel } from "@getpaseo/protocol/tool-call-display";
 import { createHash } from "node:crypto";
 
-import type { TimelineEntry } from "./review-prompt";
+import { buildSkillFileContext, type ReviewPromptInput, type TimelineEntry } from "./review-prompt";
 import { registerCuratorAgentId } from "./curator-agents";
 import { resolveReadOnlyConfig, type RoutingProviders, type ReadOnlyConfig } from "../shared/routing";
 import { routingSettingsSchema } from "../shared/settings";
@@ -544,6 +544,7 @@ export class PaseoAdapter {
     turnId: string,
     prompt: string,
     reviewId?: string,
+    skillFiles?: ReviewPromptInput["skillFiles"],
   ): Promise<CuratorRunResult> {
     const provider = sourceAgent.provider.trim();
     const selection = provider.includes("/") ? provider
@@ -570,7 +571,7 @@ export class PaseoAdapter {
           config: selected.config,
           cwd: sourceAgent.cwd,
           parent: sourceAgent.id,
-          prompt,
+          prompt: selected.config.provider.startsWith("opencode/") ? `${prompt}\n\n${buildSkillFileContext(skillFiles ?? [])}` : prompt,
           background: true,
           idempotencyKey: `paseo-curator:${sourceAgent.id}:${reviewKey}:${routeKey}`,
           title: `Curator: ${sourceAgent.id} / ${turnId}`,
@@ -588,7 +589,8 @@ export class PaseoAdapter {
     let created: Awaited<ReturnType<typeof create>>;
     try {
       created = await create(route);
-    } catch {
+    } catch (error) {
+      if (error instanceof CuratorRunError && !error.message.endsWith("create-failed")) throw error;
       const fallback = route.consent ? null : await this.resolveFallbackProvider(sourceAgent.cwd);
       if (!fallback || fallback.config.provider === route.config.provider) {
         throw curatorError(sourceAgent.id, turnId, "create-failed");

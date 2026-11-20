@@ -1176,3 +1176,65 @@ describe("provider-agnostic curator routing", () => {
     expect(createCalls).toHaveLength(0);
   });
 });
+
+
+it("never substitutes a fallback when the resolved source is disabled before transmission", async () => {
+  const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+  let resolved = false;
+  paseo.providers!.waitForReady = async () => routingSnapshot([
+    { provider: "codex", enabled: !resolved, status: "ready" },
+    { provider: "claude", enabled: true, status: "ready" },
+  ]);
+  paseo.providers!.listControls = async draft => { resolved = true; return routingControls(draft); };
+  paseo.providers!.listModels = async provider => routingModels(provider, [{ id: "model", label: "Model" }]);
+  const settings = { read: async () => ({ status: "ready" as const, values: { fallbackProvider: "claude" } }) };
+  await expect(new PaseoAdapter(paseo, settings).runCurator({ id: "source", provider: "codex/model", cwd: "/repo" }, "turn", PROMPT)).rejects.toThrow(/provider-unavailable/);
+  expect(createCalls).toHaveLength(0);
+});
+
+it("never sends a saved disabled fallback to another ready provider", async () => {
+  const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+  paseo.providers!.waitForReady = async () => routingSnapshot([
+    { provider: "codex", enabled: false, status: "ready" }, { provider: "claude", enabled: true, status: "ready" },
+  ]);
+  const settings = { read: async () => ({ status: "ready" as const, values: { fallbackProvider: "codex" } }) };
+  await expect(new PaseoAdapter(paseo, settings).runCurator({ id: "source", provider: "hermes/model", cwd: "/repo" }, "turn", PROMPT)).rejects.toThrow();
+  expect(createCalls).toHaveLength(0);
+});
+
+
+it.each(["claude", "opencode"])("sends snapshot file context only to tool-less %s route", async family => {
+  const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+  paseo.providers!.waitForReady = async () => routingSnapshot([{ provider: family, enabled: true, status: "ready" }]);
+  await new PaseoAdapter(paseo).runCurator({ id: "source", provider: `${family}/model`, cwd: "/repo" }, "turn", PROMPT, undefined,
+    [{ skillName: "fixture", path: "SKILL.md", content: "SNAPSHOT_ONLY_SENTINEL" }]);
+  expect(createCalls[0].prompt.includes("SNAPSHOT_ONLY_SENTINEL")).toBe(family === "opencode");
+});
+
+it.each([["codex", "opencode"], ["opencode", "claude"]])(
+  "rebuilds the prompt for a retry from %s to %s and sends snapshots only to OpenCode",
+  async (sourceProvider, fallbackProvider) => {
+    const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+    paseo.providers!.waitForReady = async () => routingSnapshot([
+      { provider: sourceProvider, enabled: true, status: "ready" },
+      { provider: fallbackProvider, enabled: true, status: "ready" },
+    ]);
+    paseo.providers!.listModels = async provider => routingModels(provider, [{ id: "fallback-model", label: "Fallback" }]);
+    const create = paseo.agents.create;
+    paseo.agents.create = async options => {
+      if (options.config.provider === `${sourceProvider}/source-model`) {
+        createCalls.push(options);
+        throw new Error("Source create failed");
+      }
+      return create(options);
+    };
+    const settings = { read: async () => ({ status: "ready" as const, values: { fallbackProvider } }) };
+    const adapter = new PaseoAdapter(paseo, settings);
+    const snapshot = { skillName: "fixture", path: "SKILL.md", content: "SNAPSHOT_ONLY_SENTINEL" };
+
+    await adapter.runCurator({ id: "source", provider: `${sourceProvider}/source-model`, cwd: "/repo" }, "turn", PROMPT, undefined, [snapshot]);
+
+    expect(createCalls.map(call => call.config.provider)).toEqual([`${sourceProvider}/source-model`, `${fallbackProvider}/fallback-model`]);
+    expect(createCalls.map(call => call.prompt.includes(snapshot.content))).toEqual([sourceProvider === "opencode", fallbackProvider === "opencode"]);
+  },
+);

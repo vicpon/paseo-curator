@@ -1259,3 +1259,20 @@ describe("SkillManager.applyBatch", () => {
     });
   });
 });
+
+
+it("supplies exact captured skill files for tool-less inference without rereading changed files", () => {
+  const root = newRoot("review-context");
+  createSkill(root, "safe-review", skillMd("safe-review", "body"));
+  const content = readFileSync(join(root, "safe-review", "SKILL.md"), "utf8");
+  mkdirSync(join(root, "safe-review", "references"));
+  writeFileSync(join(root, "safe-review", "references", "notes.md"), "exact support text");
+  const manager = new SkillManager(root);
+  const token = manager.captureReviewSnapshot();
+  writeFileSync(join(root, "safe-review", "SKILL.md"), "changed after capture");
+  expect(manager.reviewSkillFiles(token)).toEqual([
+    { skillName: "safe-review", path: "references/notes.md", content: "exact support text" },
+    { skillName: "safe-review", path: "SKILL.md", content },
+  ]);
+  expect(() => manager.reviewSkillFiles({})).toThrow(/snapshot/);
+});

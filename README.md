@@ -18,7 +18,7 @@ The curator returns structured proposals such as "create this skill," "replace t
 - Paseo `0.16.0-beta.2` or later
 - Node.js 22 or later (`node:sqlite`)
 
-Reviews preserve the exact source provider/model when native read-only controls are available. Codex uses its native read-only sandbox; Claude exposes only Read, Glob and Grep and denies all MCP tools. Session mode names are not used as safety controls. Other installed providers remain visible with an unavailable reason. See [routing controls and acceptance matrix](docs/routing.md).
+Reviews preserve the exact source provider/model when native read-only controls are available. Codex uses its native read-only sandbox; Claude exposes only Read, Glob and Grep and denies all MCP tools. Session mode names are not used as safety controls. OpenCode denies all native and MCP tools and receives bounded captured skill text from the plugin. Only enabled host providers are shown; availability and curator safety are separate. See [routing controls and acceptance matrix](docs/routing.md).
 
 ## Install
 
@@ -72,7 +72,7 @@ The plugin runs its learning pipeline on the server and adds a small client rend
 
 ## Configuration
 
-In Settings → Plugins → Curator, **Fallback provider** discovers the host's catalog. **None** (default) disables fallback. Selecting an enabled, available provider with supported native controls explicitly authorizes transmission to that provider when the exact source route cannot run. **Fallback model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both selections, including unavailable ones, without saving. Unsupported providers have disabled controls and specific reasons.
+In Settings → Plugins → Curator, **Fallback provider** discovers the host's catalog. **None** (default) disables fallback. Selecting an enabled, available provider with supported native controls explicitly authorizes transmission to that provider when the exact source route cannot run. **Fallback model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both selections, including unavailable ones, without saving. Ready providers with unsupported curator policies show a review-blocked reason. Host-disabled entries disappear from the list and selector; a saved inactive choice is preserved without substitution.
 
 Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum, but unknown native policies still fail closed.
 
@@ -99,6 +99,8 @@ Durable state includes cadence counters, queue claims and retries, reconciliatio
 ## What is sent to providers
 
 The curator prompt contains a bounded excerpt of one completed source turn plus an index of the shared skill library. It can include user and assistant messages, reasoning, tool calls and output, file contents, credentials, secrets, and personal information already present in that turn. The size bounds do not redact sensitive data, and there is no no-credentials or no-file-contents guarantee.
+
+For OpenCode only, the plugin also sends exact captured skill-file text, bounded to 120,000 serialized characters. Hidden paths and common binary indicators are omitted; this is not secret detection or redaction. Existing Codex/Claude routes do not receive this extra bundle.
 
 The background agent runs in the source workspace. Read tools can inspect skills and workspace files; their results can be sent to the selected provider too. The provider configured for the selected route receives the prompt and tool results under its own data policy and your account settings. The plugin is trusted, unsandboxed daemon code with the daemon user's filesystem and network access.
 
@@ -161,12 +163,12 @@ A successful review ends with queue status `nothing_to_save` or `applied`. An `a
 - A pre-mutation intent journal reconciles crashes between filesystem commit and SQLite queue completion without rerunning nondeterministic curator output.
 - Queue claims use attempt-generation fencing; stale attempts cannot complete newer claims and are checked during filesystem application.
 - Timeline reset, gap, stale cursor, epoch changes, and non-progressing pagination are rejected.
-- Curator agents are excluded from their own lifecycle. The plugin requests verified native confinement options and refuses providers without them. Its permission guard denies requests that reach Paseo; this hook alone does not confine native tools. Agent IDs include the route and queue attempt and are registered before creation. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. No live provider confinement test was performed for this change.
+- Curator agents are excluded from their own lifecycle. The plugin requests verified native confinement options and refuses providers without them. Its permission guard denies requests that reach Paseo; this hook alone does not confine native tools. Agent IDs include the route and queue attempt and are registered before creation. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. See the routing matrix for completed live reviews and the limits of canary checks.
 - Source-turn entries and skill-index descriptions are explicitly delimited as untrusted data; curator agents are instructed never to execute quoted commands or tasks.
 - Automatic maintenance archives only skills whose frontmatter says `created_by: paseo-curator`. User and externally installed skills are protected from archival, but reviews can patch them or remove their support files.
 - Prompts, transcripts, raw model output, secrets, and PII are not persisted in errors or audit records.
 
-Native controls and their inspected upstream implementations are documented in the [routing acceptance matrix](docs/routing.md). Source inspection and adapter tests do not establish live provider confinement; no live review or plugin reload was performed for this change. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; version checks compare raw bytes.
+Native controls and their inspected upstream implementations are documented in the [routing acceptance matrix](docs/routing.md). Real Codex, Claude and OpenCode route checks and their SQLite terminal results are documented there; model claims alone are not tool-enforcement proof. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; version checks compare raw bytes.
 
 ## Recovery behavior
 

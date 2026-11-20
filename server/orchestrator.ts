@@ -56,7 +56,7 @@ interface QueueStoreLike {
 /** The bounded timeline/curator adapter surface the orchestrator consumes. */
 interface AdapterLike {
   readWholeTurn(agent: SourceAgent, turnId: string): Promise<WholeTurnRead>;
-  runCurator(agent: SourceAgent, turnId: string, prompt: string, reviewId?: string): Promise<{
+  runCurator(agent: SourceAgent, turnId: string, prompt: string, reviewId?: string, skillFiles?: Array<{ skillName: string; path: string; content: string }>): Promise<{
     curatorAgentId: string;
     finalText: string;
   }>;
@@ -65,6 +65,7 @@ interface AdapterLike {
 /** The guarded skill-manager surface the orchestrator consumes. */
 interface SkillManagerLike {
   captureReviewSnapshot(): ReviewSnapshot;
+  reviewSkillFiles(token: ReviewSnapshot): Array<{ skillName: string; path: string; content: string }>;
   reconcileBatch(
     context: { queueId: string; sourceAgentId: string; turnId: string },
   ): Promise<
@@ -422,7 +423,7 @@ export class CuratorOrchestrator {
       }).prompt;
 
       // Run the curator and parse its strict, content-validated result.
-      const result = await this.adapter.runCurator(rereadAgent, row.turnId, prompt, `${row.id}:${row.attempts}`);
+      const result = await this.adapter.runCurator(rereadAgent, row.turnId, prompt, `${row.id}:${row.attempts}`, this.skillManager.reviewSkillFiles(reviewSnapshot));
       const parsed = parseReviewResult(result.finalText);
 
       if (parsed === null) {

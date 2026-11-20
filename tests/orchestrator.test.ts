@@ -183,6 +183,7 @@ type ManagerOutcome = "applied" | "rejected" | "rolled_back" | "rollback_failed"
 /** A typed skill-manager fake that records every applyBatch invocation. */
 class FakeManager {
   captureReviewSnapshot(): object { return {}; }
+  reviewSkillFiles(): Array<{ skillName: string; path: string; content: string }> { return [{ skillName: "review-context", path: "SKILL.md", content: "exact captured skill body" }]; }
   reconcileResult: "none" | "applied" | "reconciliation_required" = "none";
   reconcileCalls: Array<{ queueId: string; sourceAgentId: string; turnId: string }> = [];
   calls: Array<{

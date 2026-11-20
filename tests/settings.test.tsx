@@ -41,7 +41,7 @@ describe("routing settings UI", () => {
     render(<CuratorSettings />);
     await waitFor(() => expect(screen.getByRole("option", { name: "Claude" })).toBeTruthy());
     expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("");
-    expect(screen.getAllByRole("button", { name: "Unavailable" })).toHaveLength(3);
+    expect(screen.queryAllByRole("button", { name: "Unavailable" })).toHaveLength(0);
     expect(screen.getByText(/source turn.*skill index.*selected provider/i)).toBeTruthy();
     expect(screen.getByText(/file contents and secrets/)).toBeTruthy();
     expect(save).not.toHaveBeenCalled();
@@ -54,12 +54,12 @@ describe("routing settings UI", () => {
     await waitFor(() => expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b"));
     providers.waitForReady.mockResolvedValue(routingSnapshot([]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
-    await waitFor(() => expect(screen.getByRole("option", { name: /claude.*unavailable/ })).toBeTruthy());
-    expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b");
+    await waitFor(() => expect(screen.getByRole("option", { name: "Saved fallback inactive" })).toBeTruthy());
+    expect(screen.queryByLabelText("Fallback model")).toBeNull();
     providers.waitForReady.mockRejectedValue(new Error("connection lost"));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
     await screen.findByText(/Provider discovery failed/);
-    expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("claude");
+    expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("__inactive__");
     expect(save).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
     expect(save).toHaveBeenCalledWith({}, "revision-1");
@@ -80,4 +80,42 @@ describe("routing settings UI", () => {
     expect(screen.getByText("Invalid settings")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reset fallback" })).toBeTruthy();
   });
+});
+
+
+it("removes host-disabled providers from rows and selector on refresh without changing consent", async () => {
+  const { providers, save } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
+  render(<CuratorSettings />);
+  await screen.findByRole("option", { name: "Claude" });
+  providers.waitForReady.mockResolvedValue(routingSnapshot(liveSnapshot.entries.map(e => e.provider === "claude" ? { ...e, enabled: false } : e)));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
+  await waitFor(() => expect(screen.queryByRole("option", { name: /claude/i })).toBeNull());
+  expect(screen.queryByText("Claude")).toBeNull();
+  expect(screen.queryByText("Copilot")).toBeNull();
+  expect(screen.queryByRole("option", { name: /copilot/i })).toBeNull();
+  expect(screen.getByText(/Saved fallback is inactive/)).toBeTruthy();
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+  expect(save).toHaveBeenCalledWith({}, "revision-1");
+});
+
+it("does not describe ready providers with unsupported curator policies as unavailable", async () => {
+  setup();
+  render(<CuratorSettings />);
+  await screen.findByRole("option", { name: "Claude" });
+  expect(screen.queryByRole("button", { name: "Unavailable" })).toBeNull();
+  expect(screen.getAllByText(/Ready.*review blocked/)).toHaveLength(2);
+});
+
+
+it("clears stale ready rows and provider choices when refreshing an unreachable host", async () => {
+  const { providers, save } = setup({ fallbackProvider: "claude" });
+  render(<CuratorSettings />);
+  await screen.findByRole("option", { name: "Claude" });
+  providers.waitForReady.mockRejectedValue(new Error("offline"));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
+  await screen.findByText(/Provider discovery failed/);
+  expect(screen.queryByRole("option", { name: "Claude" })).toBeNull();
+  expect(screen.queryByText(/^Ready/)).toBeNull();
+  expect(save).not.toHaveBeenCalled();
 });

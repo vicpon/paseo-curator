@@ -15,6 +15,7 @@ export interface ReadOnlyConfig {
 function nativeOptions(provider: string): Record<string, unknown> | null {
   switch (provider) {
     case "codex": return { sandbox_mode: "read-only", approval_policy: "never" };
+    case "opencode": return { permission: "deny", auto_accept: false };
     case "claude": return {
       extraArgs: { tools: "Read,Glob,Grep" },
       allowedTools: ["Read", "Glob", "Grep"],
@@ -26,9 +27,8 @@ function nativeOptions(provider: string): Record<string, unknown> | null {
 
 export function confinementStatus(provider: string): string | null {
   switch (provider) {
-    case "codex": case "claude": return null;
+    case "codex": case "claude": case "opencode": return null;
     case "omp": return "Paseo exposes approval modes, but no native read-only sandbox or tool allowlist for OMP.";
-    case "opencode": return "Paseo exposes deny-all or fixed permission keys, but no verified read-only allowlist covering extension tools.";
     default: return "This host provider has no verified native read-only sandbox or tool allowlist exposed to Curator.";
   }
 }
@@ -36,6 +36,7 @@ export function confinementStatus(provider: string): string | null {
 export interface RoutingProvider {
   id: string;
   label: string;
+  available: boolean;
   supported: boolean;
   reason: string;
   models: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }>;
@@ -43,23 +44,23 @@ export interface RoutingProvider {
 
 export async function discoverRoutingProviders(api: RoutingProviders): Promise<RoutingProvider[]> {
   const { entries } = await api.waitForReady({ timeoutMs: 10_000 });
-  return Promise.all([...entries].sort((a, b) => a.provider.localeCompare(b.provider)).map(async entry => {
-    const reason = !entry.enabled ? "Disabled in host settings."
-      : entry.status !== "ready" ? "Unavailable on this host."
+  return Promise.all(entries.filter(entry => entry.enabled).sort((a, b) => a.provider.localeCompare(b.provider)).map(async entry => {
+    const available = entry.status === "ready";
+    const reason = entry.status !== "ready" ? "Unavailable on this host."
       : confinementStatus(entry.provider);
-    if (reason) return { id: entry.provider, label: entry.label ?? entry.provider, supported: false, reason, models: [] };
+    if (reason) return { id: entry.provider, label: entry.label ?? entry.provider, available, supported: false, reason, models: [] };
     try {
       const { models, error } = await api.listModels(entry.provider);
       const model = models?.find(m => m.isDefault) ?? models?.[0];
       const config = model && !error ? await resolveReadOnlyConfig(api, `${entry.provider}/${model.id}`, ".") : null;
       return {
-        id: entry.provider, label: entry.label ?? entry.provider, supported: config !== null,
-        reason: config ? (entry.provider === "claude" ? "Read, Glob and Grep only; MCP tools denied." : "Native read-only sandbox; escalation disabled.")
+        id: entry.provider, label: entry.label ?? entry.provider, available, supported: config !== null,
+        reason: config ? (entry.provider === "opencode" ? "All native and MCP tools denied; plugin supplies skill snapshots." : entry.provider === "claude" ? "Read, Glob and Grep only; MCP tools denied." : "Native read-only sandbox; escalation disabled.")
           : "Host could not resolve the required native controls or an available model.",
         models: models ?? [],
       };
     } catch {
-      return { id: entry.provider, label: entry.label ?? entry.provider, supported: false, reason: "Provider discovery failed; refresh to retry.", models: [] };
+      return { id: entry.provider, label: entry.label ?? entry.provider, available, supported: false, reason: "Provider discovery failed; refresh to retry.", models: [] };
     }
   }));
 }

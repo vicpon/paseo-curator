@@ -15,6 +15,7 @@ export function CuratorSettings() {
     let disposed = false;
     setLoading(true);
     setError(null);
+    setCatalog([]);
     void (async () => {
       if (refresh > 0) await paseo.providers.refresh();
       const next = await discoverRoutingProviders(paseo.providers);
@@ -37,9 +38,8 @@ export function CuratorSettings() {
   const selected = state.values.fallbackProvider;
   const provider = catalog.find(p => p.id === selected);
   const options = catalog.filter(p => p.supported).map(p => ({ label: p.label, value: p.id }));
-  if (selected && !options.some(p => p.value === selected)) {
-    options.push({ label: `${provider?.label ?? selected} (unavailable; selection preserved)`, value: selected });
-  }
+  const inactive = !!selected && !options.some(p => p.value === selected);
+  if (inactive) options.unshift({ label: loading ? "Saved fallback (checking host)" : "Saved fallback inactive", value: "__inactive__" });
   const models = provider?.models.map(model => ({ label: model.label, value: model.id })) ?? [];
   const selectedModel = state.values.fallbackModel;
   if (selectedModel && !models.some(m => m.value === selectedModel)) {
@@ -47,9 +47,9 @@ export function CuratorSettings() {
   }
   return (
     <SettingsSection title="Curator routing"
-      info="Fallback sends the bounded source turn and skill index to your selected provider under its data policy. The turn can contain file contents and secrets. Read-only tools can read workspace and skill files. None disables cross-provider transmission; source reviews use the exact source provider and model when safe.">
-      <SettingsSelect label="Fallback provider" value={selected ?? ""}
-        hint="Only your explicit choice enables fallback. Unavailable providers remain listed below. None revokes fallback, including during refresh."
+      info="Fallback sends the bounded source turn and skill index to your selected provider under its data policy. OpenCode also receives bounded captured skill text with all tools denied. The turn and skill text can contain file contents and secrets. Read-only tools can read workspace and skill files. None disables cross-provider transmission; source reviews use the exact source provider and model when safe.">
+      <SettingsSelect label="Fallback provider" value={inactive ? "__inactive__" : selected ?? ""}
+        hint="Only your explicit choice enables fallback. Only enabled host providers are shown. None revokes fallback, including during refresh."
         options={[{ label: "None", value: "" }, ...options]}
         disabled={state.saving} error={state.saveError}
         onValueChange={value => {
@@ -58,7 +58,8 @@ export function CuratorSettings() {
             void state.save({ fallbackProvider: value }, state.revision);
           }
         }} />
-      {selected && <SettingsSelect label="Fallback model" value={selectedModel ?? ""}
+      {inactive && !loading && <SettingsRow label="Saved fallback is inactive; reviews cannot use it. Choose an enabled supported provider or None. The saved choice is preserved." />}
+      {selected && provider && <SettingsSelect label="Fallback model" value={selectedModel ?? ""}
         hint="Provider default follows that provider's current default model. An explicit model is preserved on refresh; unavailable selections fail closed. Changing this model changes where review data is sent."
         options={[{ label: "Provider default", value: "" }, ...models]}
         disabled={state.saving || loading || !!error || !provider?.supported}
@@ -69,10 +70,8 @@ export function CuratorSettings() {
         }} />}
       <SettingsAction label={loading ? "Loading providers" : error ?? "Provider availability and safety"}
         actionLabel="Refresh providers" disabled={loading} onPress={() => setRefresh(value => value + 1)} />
-      {catalog.map(item => item.supported
-        ? <SettingsRow key={item.id} label={item.label} hint={item.reason} />
-        : <SettingsAction key={item.id} label={item.label} hint={item.reason}
-            actionLabel="Unavailable" disabled onPress={() => {}} />)}
+      {catalog.map(item => <SettingsRow key={item.id} label={item.label}
+        hint={`${item.available ? "Ready" : "Unavailable on host"}${item.supported ? "" : "; review blocked"}. ${item.reason}`} />)}
     </SettingsSection>
   );
 }
