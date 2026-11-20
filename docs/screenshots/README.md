@@ -9,7 +9,7 @@ Captured from the existing Linux Paseo `0.17.0-beta.1` desktop window on 2026-11
 
 ### Missing activity screenshot
 
-The read-only SQLite audit search found positive applied reviews. All available timeline pages were checked for the 17 source agents with such audits; none retained an applied Curator activity item. Three failure items remained on one source agent. An audit record alone is not a native activity screenshot, so no applied notice was reconstructed, appended or fabricated. A genuine **Self-improvement review — updated …** capture remains outstanding.
+The read-only SQLite audit search found positive applied reviews. All available timeline pages were checked for the 17 source agents with such audits; none retained an applied Curator activity item. Three failure items remained on one source agent, appended at 18:31, 18:39 and 18:43 UTC after the current daemon started at 18:06 UTC. They do not prove persistence across a daemon restart. An audit record alone is not a native activity screenshot, so no applied notice was reconstructed, appended or fabricated. A genuine **Self-improvement review — updated …** capture remains outstanding.
 
 ### Listing render limitation
 
