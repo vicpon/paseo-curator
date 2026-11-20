@@ -133,9 +133,10 @@ harness evidence and are not native UI evidence.
 Native UAT after the authorized exact-SHA checkout update and curator-only reload:
 
 1. Open native Settings → Plugins → Curator on host `vpc`.
-2. Verify the settings show the fallback control and refresh action, with no provider status
-   list or diagnostic disclosure. Blocked OMP/Hermes/GLM and disabled families are absent.
-3. Open fallback menu: None and supported enabled routes only. None remains the saved default.
+2. Verify Curator routing shows Review provider and Refresh providers. Review model appears
+   after selecting an available provider. The section has no provider status list or diagnostic disclosure.
+3. Open Review provider and verify that it offers None and supported enabled routes. Blocked OMP,
+   Hermes, GLM, and disabled families are absent. None remains the saved default.
 4. Refresh: selection is preserved without a settings save. A host-disabled saved route is
    omitted from the menu; its generic inactive placeholder cannot authorize another route.
 5. Clear to None to revoke fallback. Already transmitted reviews cannot be recalled.

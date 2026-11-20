@@ -6,14 +6,14 @@ routing discovery with HTML substitutes for Paseo's injected host controls. It d
 install or reload a plugin, connect to the daemon, or send model requests. The catalog is
 a fixture based on the standard CLI catalog observed 2026-11-20; models are explicitly fixtures.
 
-Choose Claude or Codex, pin a model, refresh providers, then reload the browser. Both
-selections should persist in harness-only localStorage. None clears both. Unsupported
-providers have disabled buttons and precise reasons. Check desktop and 375px layouts.
+Choose Claude or Codex under Review provider, pin a Review model, select Refresh providers,
+then reload the browser. Both selections should persist in harness-only localStorage.
+None clears both. Unsupported providers are omitted from the menu. Check desktop and 375px layouts.
 Screenshots of this harness are browser evidence, not native Paseo UI verification.
 
 - `main.tsx`, `index.html`, `style.css`: browser entry and clearly labeled fixture layout.
 - `host-client.tsx`: fixture catalog, model controls, and local settings persistence.
-- `host-ui.tsx`: HTML host control substitutes.
+- `host-ui.tsx`: HTML substitutes for host controls and the native refresh button.
 - `vite.config.ts`: loopback-only server and module aliases.
 
 The automated interaction regressions are [settings.test.tsx](../settings.test.tsx).

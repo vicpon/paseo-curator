@@ -8,12 +8,15 @@ import type { ReactNode } from "react";
 const { useSettings, usePaseo, register } = vi.hoisted(() => ({ useSettings: vi.fn(), usePaseo: vi.fn(), register: vi.fn() }));
 vi.mock("@getpaseo/plugin/client", () => ({ useSettings, usePaseo }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({
-  SettingsSection: ({ title, info, children }: { title: string; info: string; children: ReactNode }) => <section><h1>{title}</h1><p>{info}</p>{children}</section>,
+  SettingsSection: ({ title, info, trailing, children }: { title: string; info: string; trailing?: ReactNode; children: ReactNode }) => <section><h1>{title}</h1>{trailing}<p>{info}</p>{children}</section>,
   SettingsSelect: ({ label, value, options, onValueChange, disabled, error, hint }: { label: string; value: string; options: { value: string; label: string }[]; onValueChange: (value: string) => void; disabled?: boolean; error?: string; hint?: string }) => <label>{label}{!options.some(o => o.value === value) && <span>{value}</span>}<select aria-label={label} value={value} disabled={disabled} onChange={e => onValueChange(e.target.value)}>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select><span>{hint}{error}</span></label>,
   SettingsAction: ({ label, actionLabel, onPress, disabled, hint }: { label: string; actionLabel: string; onPress: () => void; disabled?: boolean; hint?: string }) => <div>{label}<p>{hint}</p><button disabled={disabled} onClick={onPress}>{actionLabel}</button></div>,
   SettingsRow: ({ label, hint }: { label: string; hint?: string }) => <div>{label}<p>{hint}</p></div>,
 }));
-vi.mock("react-native", () => ({ Text: "text" }));
+vi.mock("react-native", () => ({
+  Text: "text",
+  Button: ({ title, onPress, disabled }: { title: string; onPress: () => void; disabled?: boolean }) => <button disabled={disabled} onClick={onPress}>{title}</button>,
+}));
 
 import contribute from "../index.client";
 import { CuratorSettings } from "../client/settings";
@@ -40,37 +43,38 @@ describe("routing settings UI", () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ Component: CuratorSettings }));
     render(<CuratorSettings />);
     await waitFor(() => expect(screen.getByRole("option", { name: "Claude" })).toBeTruthy());
-    expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByLabelText("Review provider") as HTMLSelectElement).value).toBe("");
     expect(screen.queryAllByRole("button", { name: "Unavailable" })).toHaveLength(0);
-    expect(screen.getByText(/source turn.*skill index.*selected provider/i)).toBeTruthy();
+    expect(screen.getByText(/selected provider is used when the source review cannot run/i)).toBeTruthy();
+    expect(screen.getByText(/bounded source turn.*skill index/)).toBeTruthy();
     expect(screen.getByText(/file contents and secrets/)).toBeTruthy();
     expect(save).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "claude" } });
+    fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "claude" } });
     expect(save).toHaveBeenCalledWith({ fallbackProvider: "claude" }, "revision-1");
   });
   it("preserves the selected provider and nested model across refresh, disappearance and discovery failure", async () => {
     const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
     render(<CuratorSettings />);
-    await waitFor(() => expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b"));
+    await waitFor(() => expect((screen.getByLabelText("Review model") as HTMLSelectElement).value).toBe("vendor/model-b"));
     providers.waitForReady.mockResolvedValue(routingSnapshot([]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
-    await screen.findByText(/Saved fallback is inactive/);
-    expect(screen.queryByLabelText("Fallback model")).toBeNull();
+    await screen.findByText(/Saved review provider is inactive/);
+    expect(screen.queryByLabelText("Review model")).toBeNull();
     providers.waitForReady.mockRejectedValue(new Error("connection lost"));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
     await screen.findByText(/Provider discovery failed/);
     expect(screen.queryByRole("option", { name: /saved|claude/i })).toBeNull();
     expect(save).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "" } });
     expect(save).toHaveBeenCalledWith({}, "revision-1");
   });
   it("saves explicit model changes and can clear fallback while discovery is pending", async () => {
     const { save } = setup({ fallbackProvider: "codex" });
     render(<CuratorSettings />);
     await screen.findByRole("option", { name: "Model B" });
-    fireEvent.change(screen.getByLabelText("Fallback model"), { target: { value: "vendor/model-b" } });
+    fireEvent.change(screen.getByLabelText("Review model"), { target: { value: "vendor/model-b" } });
     expect(save).toHaveBeenCalledWith({ fallbackProvider: "codex", fallbackModel: "vendor/model-b" }, "revision-1");
-    fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "" } });
     expect(save).toHaveBeenLastCalledWith({}, "revision-1");
   });
   it("displays invalid settings and saving errors without silently resetting consent", () => {
@@ -78,7 +82,7 @@ describe("routing settings UI", () => {
     useSettings.mockReturnValue({ status: "invalid", revision: "bad", error: "Invalid settings", reset: vi.fn() });
     render(<CuratorSettings />);
     expect(screen.getByText("Invalid settings")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reset fallback" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reset review settings" })).toBeTruthy();
   });
 });
 
@@ -93,9 +97,9 @@ it("removes host-disabled providers from rows and selector on refresh without ch
   expect(screen.queryByText("Claude")).toBeNull();
   expect(screen.queryByText("Copilot")).toBeNull();
   expect(screen.queryByRole("option", { name: /copilot/i })).toBeNull();
-  expect(screen.getByText(/Saved fallback is inactive/)).toBeTruthy();
+  expect(screen.getByText(/Saved review provider is inactive/)).toBeTruthy();
   expect(save).not.toHaveBeenCalled();
-  fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "" } });
   expect(save).toHaveBeenCalledWith({}, "revision-1");
 });
 
@@ -103,37 +107,42 @@ it("omits blocked names, policy reasons and the entire provider status list", as
   setup();
   const { container } = render(<CuratorSettings />);
   await screen.findByRole("option", { name: "Claude" });
-  expect(Array.from(screen.getByLabelText("Fallback provider").querySelectorAll("option"), o => o.textContent))
+  expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent))
     .toEqual(["None", "Claude", "Codex", "OpenCode"]);
-  for (const text of ["Oh My Pi", "Hermes", "Provider availability and safety", "review blocked",
+  for (const text of ["Oh My Pi", "Hermes", "Provider availability and safety", "Providers", "Loading providers", "review blocked",
     "Paseo exposes approval modes", "no verified native read-only", "escalation disabled", "MCP tools denied"]) {
     expect(container.textContent).not.toContain(text);
   }
+  expect(container.textContent).not.toMatch(/fallback/i);
+  expect(screen.getAllByRole("heading").map(h => h.textContent)).toEqual(["Curator routing"]);
+  expect(screen.getByRole("button", { name: "Refresh providers" })).toBeTruthy();
   expect(container.querySelector("details")).toBeNull();
 });
 
 it("hides a saved blocked provider and its model without resetting consent", async () => {
   const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
   providers.listControls.mockResolvedValue({ ...await routingControls({ provider: "claude/model-a", cwd: "." }), options: {} });
-  render(<CuratorSettings />);
-  await screen.findByText(/Saved fallback is inactive/);
-  expect(Array.from(screen.getByLabelText("Fallback provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
+  const { container } = render(<CuratorSettings />);
+  await screen.findByText(/Saved review provider is inactive/);
+  expect(container.textContent).not.toMatch(/fallback/i);
+  expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
   expect(screen.queryByText("Claude")).toBeNull();
-  expect(screen.queryByLabelText("Fallback model")).toBeNull();
+  expect(screen.queryByLabelText("Review model")).toBeNull();
   expect(screen.queryByText(/model-b/)).toBeNull();
   expect(save).not.toHaveBeenCalled();
-  fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "" } });
   expect(save).toHaveBeenCalledWith({}, "revision-1");
 });
 
 it("offers only None while checking a saved route and lets None revoke immediately", () => {
   const { providers, save } = setup({ fallbackProvider: "hermes", fallbackModel: "private/model" });
   providers.waitForReady.mockReturnValue(new Promise(() => {}));
-  render(<CuratorSettings />);
-  expect(Array.from(screen.getByLabelText("Fallback provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
-  expect(screen.queryByLabelText("Fallback model")).toBeNull();
+  const { container } = render(<CuratorSettings />);
+  expect(container.textContent).not.toMatch(/fallback/i);
+  expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
+  expect(screen.queryByLabelText("Review model")).toBeNull();
   expect(save).not.toHaveBeenCalled();
-  fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "" } });
   expect(save).toHaveBeenCalledWith({}, "revision-1");
 });
 
@@ -173,4 +182,16 @@ it("clears stale ready rows and provider choices when refreshing an unreachable 
   expect(screen.queryByRole("option", { name: "Claude" })).toBeNull();
   expect(screen.queryByText(/^Ready/)).toBeNull();
   expect(save).not.toHaveBeenCalled();
+});
+
+
+it("keeps refresh in the routing section without a provider row or diagnostic heading", async () => {
+  setup();
+  const { container } = render(<CuratorSettings />);
+  expect(screen.queryByText(/^Loading providers$/)).toBeNull();
+  await screen.findByRole("option", { name: "Claude" });
+  expect(screen.queryByText(/^Providers$/)).toBeNull();
+  expect(screen.getAllByRole("heading").map(h => h.textContent)).toEqual(["Curator routing"]);
+  expect(screen.getByRole("button", { name: "Refresh providers" }).closest("section")).toBe(screen.getByRole("heading", { name: "Curator routing" }).closest("section"));
+  expect(container.querySelector("details")).toBeNull();
 });
