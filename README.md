@@ -18,7 +18,7 @@ The curator returns structured proposals such as "create this skill," "replace t
 - Paseo `0.16.0-beta.2` or later
 - Node.js 22 or later (`node:sqlite`)
 
-Reviews preserve the exact source provider/model when native read-only controls are available. Codex uses its native read-only sandbox; Claude exposes only Read, Glob and Grep and denies all MCP tools. Session mode names are not used as safety controls. OpenCode denies all native and MCP tools and receives bounded captured skill text from the plugin. Settings offer only usable enabled providers. See [routing controls and acceptance matrix](docs/routing.md).
+Reviews preserve the exact source provider/model when available. All enabled, ready providers from the live host SDK catalog can be selected, including custom families. The reviewer uses the provider's normal tool permissions and can execute native tools, including file writes and commands. Curator does not confine the reviewer or enforce read-only execution. The prompt's no-write guidance is an instruction, not an enforced boundary. See [routing behavior and verification](docs/routing.md).
 
 ## Install
 
@@ -72,9 +72,9 @@ The plugin runs its learning pipeline on the server and adds a small client rend
 
 ## Configuration
 
-In Settings → Plugins → Curator, **Review provider** offers usable enabled providers from the host's catalog. **None** (default) disables fallback. Selecting a provider explicitly authorizes transmission to that provider when the exact source route cannot run. **Review model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both saved selections without saving. Blocked and host-disabled providers are hidden, including their model controls. A saved inactive choice uses a generic placeholder without substitution. Fixed technical blocker reasons remain in the app runtime console for troubleshooting; host labels, models and raw errors are not logged.
+In Settings → Plugins → Curator, **Review provider** offers all enabled, ready providers from the host's catalog. **None** (default) disables fallback. Selecting a provider explicitly authorizes transmission to that provider when the exact source route cannot run. **Review model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both saved selections without saving. Host-disabled and unavailable providers are hidden, including their model controls. A saved inactive choice uses a generic placeholder without substitution.
 
-Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum, but unknown native policies still fail closed.
+Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum or family eligibility policy.
 
 Other values remain built in:
 
@@ -83,8 +83,8 @@ Other values remain built in:
 | Skill root | `~/.agents/skills/` |
 | State database | `~/.paseo/plugins/curator/curator.sqlite` |
 | Review cadence | 10 unique tool iterations |
-| Curator provider | Exact source route when supported; explicit fallback only |
-| Curator confinement | Provider-native sandbox or restricted read-only tools |
+| Curator provider | Exact source route when available; explicit fallback only |
+| Reviewer tool permissions | Provider normal/default configuration; native tools can execute |
 | Curator concurrency | 1 |
 | Maximum operations per review | 20 |
 | Maximum retries | 3 |
@@ -94,6 +94,8 @@ Other values remain built in:
 
 Overrides for the built-in values require a source change and plugin reload. Fallback never selects another provider automatically. If no permitted route exists, the attempt raises `source-model-unavailable`, retries within the existing budget, and eventually fails with a timeline notice. This is not a successful skip or a `nothing_to_save` verdict.
 
+Normal provider permissions can require human approval. A background review may wait for approval or fail through the existing timeout/retry path; Curator does not automatically approve requests or cancel stalled reviewer agents. Ready status does not prove account/model access. Fallback still requires an enumerated model because the SDK requires a `provider/model` selection; repeated model-discovery errors prevent a send even though the provider remains selectable.
+
 Durable state includes cadence counters, queue claims and retries, reconciliation cursor, skill telemetry, and a content-free audit log. Migration preserves existing `nothing_to_save` outcomes and future exact outcomes, but cannot reconstruct no-op records that older versions already discarded or rewrote. Applied-batch intents and receipts live under `.paseo-curator/` inside the skill root.
 
 ## What is sent to providers
@@ -102,7 +104,7 @@ The curator prompt contains a bounded excerpt of one completed source turn plus 
 
 For OpenCode only, the plugin also sends exact captured skill-file text, bounded to 120,000 serialized characters. Hidden paths and common binary indicators are omitted; this is not secret detection or redaction. Existing Codex/Claude routes do not receive this extra bundle.
 
-The background agent runs in the source workspace. Read tools can inspect skills and workspace files; their results can be sent to the selected provider too. The provider configured for the selected route receives the prompt and tool results under its own data policy and your account settings. The plugin is trusted, unsandboxed daemon code with the daemon user's filesystem and network access.
+The background agent runs in the source workspace. Native tools can read or change workspace and skill files and execute commands, subject to that provider's normal permissions. Tool results can be sent to the selected provider too. The provider configured for the selected route receives the prompt and tool results under its own data policy and your account settings. The plugin is trusted, unsandboxed daemon code with the daemon user's filesystem and network access.
 
 ## How it triggers
 
@@ -156,19 +158,19 @@ A successful review ends with queue status `nothing_to_save` or `applied`. An `a
 
 ## Safety and recovery
 
-- Curator output is untrusted JSON. The plugin validates proposed mutations; the reviewing agent can still use provider read tools.
+- Curator output is untrusted JSON. The plugin validates proposed mutations; the reviewing agent can execute native tools under the provider's normal permissions. These validation checks apply to structured proposals, not direct native tool actions.
 - The plugin captures byte-exact skill versions before review, then compares touched skills under its locks before any mutation, including `remove_file`. Model-supplied read sets are advisory; the model need not echo files or compute hashes. Changes after capture reject the batch. These locks coordinate plugin batches, not arbitrary external editors.
 - Paths are contained within the canonical skill root; symlink swaps are checked again at mutation and rollback time.
 - Batches use stable locks, snapshots, atomic file writes, and rollback.
 - A pre-mutation intent journal reconciles crashes between filesystem commit and SQLite queue completion without rerunning nondeterministic curator output.
 - Queue claims use attempt-generation fencing; stale attempts cannot complete newer claims and are checked during filesystem application.
 - Timeline reset, gap, stale cursor, epoch changes, and non-progressing pagination are rejected.
-- Curator agents are excluded from their own lifecycle. The plugin requests verified native confinement options and refuses providers without them. Its permission guard denies requests that reach Paseo; this hook alone does not confine native tools. Agent IDs include the route and queue attempt and are registered before creation. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. See the routing matrix for completed live reviews and the limits of canary checks.
+- Curator agents are excluded from their own lifecycle. Agent IDs include the route and queue attempt. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. Curator adds no permission-denial hook and does not alter ordinary source-agent permissions.
 - Source-turn entries and skill-index descriptions are explicitly delimited as untrusted data; curator agents are instructed never to execute quoted commands or tasks.
 - Automatic maintenance archives only skills whose frontmatter says `created_by: paseo-curator`. User and externally installed skills are protected from archival, but reviews can patch them or remove their support files.
 - Prompts, transcripts, raw model output, secrets, and PII are not persisted in errors or audit records.
 
-Native controls and their inspected upstream implementations are documented in the [routing acceptance matrix](docs/routing.md). Real Codex, Claude and OpenCode route checks and their SQLite terminal results are documented there; model claims alone are not tool-enforcement proof. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; version checks compare raw bytes.
+Provider eligibility and native confinement checks were removed at the user's explicit request. Registry reviewers may reject this safety posture. The structured operation safeguards do not prevent a reviewer from changing files directly through native tools. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; version checks compare raw bytes.
 
 ## Recovery behavior
 

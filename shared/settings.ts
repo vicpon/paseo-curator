@@ -2,7 +2,7 @@ import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const routingSettingsSchema = z.object({
-  fallbackProvider: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).optional(),
+  fallbackProvider: z.string().min(1).max(512).regex(/^[^\s/]+$/).optional(),
   fallbackModel: z.string().min(1).max(512).regex(/^\S+$/).optional(),
 }).strict().refine(values => values.fallbackModel === undefined || values.fallbackProvider !== undefined);
 

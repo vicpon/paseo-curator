@@ -1,103 +1,47 @@
-import { liveSnapshot, claudeControls, codexControls, routingSnapshot, routingModels, routingControls } from "./routing-fixtures";
+import { liveSnapshot, routingSnapshot, routingModels } from "./routing-fixtures";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { PluginHookContext } from "@getpaseo/plugin/server";
-import type { RoutingProviders, ReadOnlyConfig } from "../shared/routing";
-import { discoverRoutingProviders, resolveReadOnlyConfig } from "../shared/routing";
+import type { RoutingProviders } from "../shared/routing";
+import { discoverRoutingProviders } from "../shared/routing";
 
-const entries: Awaited<ReturnType<RoutingProviders["waitForReady"]>>["entries"] = [
-  { provider: "omp", label: "Oh My Pi", status: "ready", enabled: true },
-  { provider: "codex", status: "ready", enabled: false },
-  { provider: "claude", status: "ready", enabled: true },
-  { provider: "hermes", status: "unavailable", enabled: true },
-  { provider: "future", status: "ready", enabled: true },
-];
+const families = ["claude", "codex", "opencode", "omp", "hermes", "glm-acp-agent", "arbitrary-provider"];
 const providers = () => ({
-  waitForReady: vi.fn(async () => routingSnapshot(entries)),
-  listModels: vi.fn(async (provider: string) => routingModels(provider, [{ id: "nested/model", label: "Model" }])),
-  listControls: vi.fn(routingControls),
+  waitForReady: vi.fn(async () => routingSnapshot([
+    ...families.map(provider => ({ provider, status: "ready" as const, enabled: true })),
+    { provider: "disabled", status: "ready" as const, enabled: false },
+    { provider: "unavailable", status: "unavailable" as const, enabled: true },
+  ])),
+  listModels: vi.fn(async (provider: string) => routingModels(provider, [{ id: "vendor/model", label: "Model" }])),
+  listControls: vi.fn(async () => { throw new Error("No native controls exposed"); }),
 });
 
-describe("provider routing discovery", () => {
-  it("discovers the host catalog independent of order or preferred names and retains unavailable entries", async () => {
-    const api = providers();
-    const first = await discoverRoutingProviders(api);
-    api.waitForReady.mockResolvedValue(routingSnapshot([...entries].reverse()));
-    expect(await discoverRoutingProviders(api)).toEqual(first);
-    expect(first.map(p => p.id).sort()).toEqual(entries.filter(p => p.enabled).map(p => p.provider).sort());
-    expect(first.find(p => p.id === "claude")?.supported).toBe(true);
-    expect(first.find(p => p.id === "codex")).toBeUndefined();
-    expect(first.find(p => p.id === "future")?.supported).toBe(false);
-  });
-});
-
-describe("native route controls", () => {
-  it("uses Codex sandbox options even when there is no read-only session mode", async () => {
-    const config = await resolveReadOnlyConfig(providers(), "codex/nested/model", "/repo");
-    expect(config).toMatchObject({ provider: "codex/nested/model", options: { sandbox_mode: "read-only", approval_policy: "never" } });
-    expect(config).not.toHaveProperty("modeId");
-  });
-  it("restricts Claude's native tools and denies every MCP tool rather than trusting ask mode", async () => {
-    expect(await resolveReadOnlyConfig(providers(), "claude/model", "/repo")).toMatchObject({
-      options: { extraArgs: { tools: "Read,Glob,Grep" }, disallowedTools: ["mcp__*"] },
-    });
-  });
-  it("fails closed if the host cannot resolve or strips required controls", async () => {
-    const api = providers();
-    api.listControls.mockResolvedValue({ ...codexControls.result, options: {}, error: null });
-    expect(await resolveReadOnlyConfig(api, "codex/model", "/repo")).toBeNull();
-    expect(await resolveReadOnlyConfig({ ...api, listControls: undefined }, "claude/model", "/repo")).toBeNull();
-    expect(await resolveReadOnlyConfig(api, "omp/model", "/repo")).toBeNull();
-  });
-});
-
-
-it("uses the installed Paseo SDK catalog and creation contracts", () => {
-  type Api = PluginHookContext["paseo"];
-  expectTypeOf<Api["providers"]>().toMatchTypeOf<RoutingProviders>();
-  expectTypeOf<ReadOnlyConfig>().toMatchTypeOf<Parameters<Api["agents"]["create"]>[0]["config"]>();
-});
-
-describe("authenticated daemon protocol regression", () => {
-  it("discovers ready providers from the SDK snapshot and resolves their native controls", async () => {
-    const api = {
-      waitForReady: async () => liveSnapshot,
-      listModels: async (provider: string) => ({ models: [{ id: (provider === "claude" ? claudeControls : codexControls).draft.provider.split("/").slice(1).join("/"), label: "Default", provider }], provider, fetchedAt: liveSnapshot.generatedAt, requestId: "models" }),
-      listControls: vi.fn(async (draft: Parameters<NonNullable<RoutingProviders["listControls"]>>[0]) => {
-        if (draft.provider.startsWith("opencode/")) return routingControls(draft);
-        const capture = draft.provider.startsWith("claude/") ? claudeControls : codexControls;
-        expect(draft).toEqual({ ...capture.draft, cwd: "." });
-        return capture.result;
-      }),
-    };
-    const catalog = await discoverRoutingProviders(api);
-    expect(catalog.filter(entry => entry.supported).map(entry => entry.id)).toEqual(["claude", "codex", "opencode"]);
-    for (const provider of ["omp", "hermes", "glm-acp-agent"]) {
-      expect(catalog.find(entry => entry.id === provider)).toMatchObject({ supported: false, reason: expect.not.stringContaining("Unavailable on this host") });
-    }
-    expect(api.listControls).toHaveBeenCalledTimes(3);
-  });
-});
-
-
-describe("enabled-only catalog and tool-less routing", () => {
-  it("omits disabled host entries entirely and does not discover their models", async () => {
+describe("host-owned provider eligibility", () => {
+  it("offers every enabled ready family without a confinement or mode lookup", async () => {
     const api = providers();
     const catalog = await discoverRoutingProviders(api);
-    expect(catalog.map(p => p.id)).not.toContain("codex");
-    expect(api.listModels).not.toHaveBeenCalledWith("codex");
-    expect(catalog.find(p => p.id === "omp")).toMatchObject({ available: true, supported: false });
-    expect(catalog.find(p => p.id === "hermes")).toMatchObject({ available: false });
+    expect(catalog.filter(p => p.supported).map(p => p.id)).toEqual([...families].sort());
+    expect(catalog.some(p => p.id === "disabled")).toBe(false);
+    expect(catalog.find(p => p.id === "unavailable")?.supported).toBe(false);
+    expect(api.listModels).not.toHaveBeenCalledWith("disabled");
+    expect(api.listModels).not.toHaveBeenCalledWith("unavailable");
+    expect(api.listControls).not.toHaveBeenCalled();
   });
-  it("supports OpenCode through native wildcard deny, including extension tools", async () => {
-    expect(await resolveReadOnlyConfig(providers(), "opencode/vendor/model", "/repo")).toEqual({
-      provider: "opencode/vendor/model", options: { permission: "deny", auto_accept: false }, toolPolicy: { preapproved: [] },
-    });
-  });
-  it("rejects a stripped wildcard deny or auto-accept override", async () => {
+  it("does not make model enumeration another eligibility gate", async () => {
     const api = providers();
-    for (const options of [{ permission: "ask", auto_accept: false }, { permission: "deny", auto_accept: true }]) {
-      api.listControls.mockResolvedValue({ ...codexControls.result, options });
-      expect(await resolveReadOnlyConfig(api, "opencode/model", "/repo")).toBeNull();
-    }
+    api.listModels.mockRejectedValue(new Error("Models unavailable"));
+    const catalog = await discoverRoutingProviders(api);
+    expect(catalog.filter(p => p.supported).map(p => p.id)).toEqual([...families].sort());
+    expect(catalog.find(p => p.id === "omp")?.models).toEqual([]);
   });
+  it("matches the real SDK catalog readiness contract independent of ordering", async () => {
+    const api = providers();
+    api.waitForReady.mockResolvedValue(liveSnapshot);
+    const catalog = await discoverRoutingProviders(api);
+    expect(catalog.filter(p => p.supported).map(p => p.id)).toEqual(["claude", "codex", "glm-acp-agent", "hermes", "omp", "opencode"]);
+    api.waitForReady.mockResolvedValue(routingSnapshot([...liveSnapshot.entries].reverse()));
+    expect(await discoverRoutingProviders(api)).toEqual(catalog);
+  });
+});
+it("uses the installed SDK catalog contract", () => {
+  expectTypeOf<PluginHookContext["paseo"]["providers"]>().toMatchTypeOf<RoutingProviders>();
 });

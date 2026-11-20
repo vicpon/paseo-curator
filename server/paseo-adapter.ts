@@ -3,8 +3,7 @@ import { buildToolCallDisplayModel } from "@getpaseo/protocol/tool-call-display"
 import { createHash } from "node:crypto";
 
 import { buildSkillFileContext, type ReviewPromptInput, type TimelineEntry } from "./review-prompt";
-import { registerCuratorAgentId } from "./curator-agents";
-import { resolveReadOnlyConfig, type RoutingProviders, type ReadOnlyConfig } from "../shared/routing";
+import type { RoutingProviders, ReviewConfig } from "../shared/routing";
 import { routingSettingsSchema } from "../shared/settings";
 
 // ---------------------------------------------------------------------------
@@ -53,7 +52,7 @@ export interface PaseoApiRef {
 }
 
 interface CuratorRoute {
-  config: ReadOnlyConfig;
+  config: ReviewConfig;
   consent?: { fallbackProvider: string; fallbackModel?: string };
 }
 
@@ -138,7 +137,7 @@ export interface RecoveredCompletedTurn {
  */
 export interface CreateAgentOptions {
   readonly agentId: string;
-  readonly config: ReadOnlyConfig;
+  readonly config: ReviewConfig;
   readonly cwd: string;
   readonly parent: string;
   readonly prompt: string;
@@ -284,13 +283,12 @@ export class PaseoAdapter {
     } catch { return false; }
   }
 
-  private async sourceRoute(selection: string | null, cwd: string): Promise<CuratorRoute | null> {
+  private async sourceRoute(selection: string | null): Promise<CuratorRoute | null> {
     if (!selection || !this.paseo.providers || !await this.providerEnabled(selection.split("/")[0])) return null;
-    const config = await resolveReadOnlyConfig(this.paseo.providers, selection, cwd);
-    return config ? { config } : null;
+    return { config: { provider: selection } };
   }
 
-  private async resolveFallbackProvider(cwd: string): Promise<CuratorRoute | null> {
+  private async resolveFallbackProvider(): Promise<CuratorRoute | null> {
     const consent = await this.readFallbackSetting();
     if (!consent || !this.paseo.providers || !await this.providerEnabled(consent.fallbackProvider)) return null;
     try {
@@ -300,8 +298,7 @@ export class PaseoAdapter {
         ? models?.find(model => model.isDefault)?.id ?? models?.[0]?.id
         : models?.find(model => model.id === consent.fallbackModel)?.id;
       if (!model) return null;
-      const config = await resolveReadOnlyConfig(this.paseo.providers, `${consent.fallbackProvider}/${model}`, cwd);
-      return config ? { config, consent } : null;
+      return { config: { provider: `${consent.fallbackProvider}/${model}` }, consent };
     } catch { return null; }
   }
 
@@ -549,8 +546,8 @@ export class PaseoAdapter {
     const provider = sourceAgent.provider.trim();
     const selection = provider.includes("/") ? provider
       : sourceAgent.model?.trim() ? `${provider}/${sourceAgent.model.trim()}` : null;
-    let route = await this.sourceRoute(selection, sourceAgent.cwd);
-    if (!route) route = await this.resolveFallbackProvider(sourceAgent.cwd);
+    let route = await this.sourceRoute(selection);
+    if (!route) route = await this.resolveFallbackProvider();
     if (!route) throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
 
     const create = async (selected: CuratorRoute) => {
@@ -564,7 +561,6 @@ export class PaseoAdapter {
       const routeKey = `${selected.config.provider}:${createHash("sha256").update(JSON.stringify(selected.config)).digest("hex").slice(0, 16)}`;
       const reviewKey = reviewId === undefined ? turnId : JSON.stringify([turnId, reviewId]);
       const agentId = deriveCuratorAgentId(sourceAgent.id, `${reviewKey}:${routeKey}`);
-      const unregister = registerCuratorAgentId(agentId);
       try {
         const handle = await this.paseo.agents.create({
           agentId,
@@ -579,9 +575,8 @@ export class PaseoAdapter {
           metadata: { "paseo.curator": true, "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
         });
         if (handle.id !== agentId) throw new Error("curator identity mismatch");
-        return { handle, unregister };
+        return { handle };
       } catch {
-        unregister();
         throw curatorError(sourceAgent.id, turnId, "create-failed");
       }
     };
@@ -591,13 +586,13 @@ export class PaseoAdapter {
       created = await create(route);
     } catch (error) {
       if (error instanceof CuratorRunError && !error.message.endsWith("create-failed")) throw error;
-      const fallback = route.consent ? null : await this.resolveFallbackProvider(sourceAgent.cwd);
+      const fallback = route.consent ? null : await this.resolveFallbackProvider();
       if (!fallback || fallback.config.provider === route.config.provider) {
         throw curatorError(sourceAgent.id, turnId, "create-failed");
       }
       created = await create(fallback);
     }
-    const { handle, unregister: unregisterCurator } = created;
+    const { handle } = created;
 
     let result: WaitForFinishResult;
     try {
@@ -606,10 +601,6 @@ export class PaseoAdapter {
       result = await handle.waitForFinish(CURATOR_WAIT_TIMEOUT_MS);
     } catch {
       throw curatorError(sourceAgent.id, turnId, "wait-failed");
-    }
-
-    if (result.status === "idle" || result.status === "error") {
-      unregisterCurator();
     }
 
     if (result.status !== "idle" || result.lastMessage === null || result.lastMessage === "") {

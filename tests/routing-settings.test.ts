@@ -45,4 +45,17 @@ describe("routing settings persistence", () => {
       expect(curatorSettings.schema.safeParse(invalid).success).toBe(false);
     }
   });
+  it.each(["local.llm", "Acme", "provider_name", "a".repeat(512)])("preserves SDK provider ID %s", fallbackProvider => {
+    const values = { fallbackProvider, fallbackModel: "vendor/model" };
+    expect(curatorSettings.schema.parse(JSON.parse(JSON.stringify(values)))).toEqual(values);
+  });
+  it.each(["", " ", "provider name", "provider\tname", "provider\nname", "provider/model", "a".repeat(513)])(
+    "rejects malformed or unbounded provider ID %s", fallbackProvider => {
+      expect(curatorSettings.schema.safeParse({ fallbackProvider }).success).toBe(false);
+    },
+  );
+  it("keeps object validation strict for custom providers", () => {
+    expect(curatorSettings.schema.safeParse({ fallbackProvider: "local.llm", unexpected: true }).success).toBe(false);
+    expect(curatorSettings.schema.safeParse({ fallbackModel: "vendor/model" }).success).toBe(false);
+  });
 });

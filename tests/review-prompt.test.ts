@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildReviewPrompt, buildSkillIndex } from "../server/review-prompt";
+import { buildReviewPrompt, buildSkillIndex, buildSkillFileContext } from "../server/review-prompt";
 import type { ReviewPromptInput, SkillSummary, TimelineEntry } from "../server/review-prompt";
 
 function entry(role: TimelineEntry["role"], content: string): TimelineEntry {
@@ -272,4 +272,10 @@ it("omits hidden files and binary data from the snapshot sent to tool-less revie
   expect(prompt).toContain("VISIBLE_FILE_SENTINEL");
   expect(prompt).not.toContain("HIDDEN_FILE_SENTINEL");
   expect(prompt).not.toContain("BINARY_FILE_SENTINEL");
+});
+
+it("does not claim provider tools are unavailable when presenting captured files", () => {
+  const context = buildSkillFileContext([{ skillName: "fixture", path: "SKILL.md", content: "fixture" }]);
+  expect(context).not.toContain("cannot be inspected through tools");
+  expect(context).toContain("read-only inspection");
 });

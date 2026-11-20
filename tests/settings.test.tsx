@@ -29,7 +29,7 @@ const theme = { colors: {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 function setup(values: { fallbackProvider?: string; fallbackModel?: string } = {}) {
   const save = vi.fn();
-  const entries = liveSnapshot.entries.filter(entry => ["omp", "claude", "codex", "hermes", "opencode"].includes(entry.provider));
+  const entries = liveSnapshot.entries;
   const providers = {
     waitForReady: vi.fn<RoutingProviders["waitForReady"]>(async () => routingSnapshot(entries)),
     listModels: vi.fn<RoutingProviders["listModels"]>(async provider => routingModels(provider, [{ id: "model-a", label: "Model A" }, { id: "vendor/model-b", label: "Model B" }])),
@@ -53,6 +53,8 @@ describe("routing settings UI", () => {
     expect(screen.getByText(/selected provider is used when the source review cannot run/i)).toBeTruthy();
     expect(screen.getByText(/bounded source turn.*skill index/)).toBeTruthy();
     expect(screen.getByText(/file contents and secrets/)).toBeTruthy();
+    expect(screen.getByText(/normal tool permissions.*execute native tools/)).toBeTruthy();
+    expect(screen.getByText(/no-write.*instruction.*not enforced/i)).toBeTruthy();
     expect(save).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "claude" } });
     expect(save).toHaveBeenCalledWith({ fallbackProvider: "claude" }, "revision-1");
@@ -108,13 +110,13 @@ it("removes host-disabled providers from rows and selector on refresh without ch
   expect(save).toHaveBeenCalledWith({}, "revision-1");
 });
 
-it("omits blocked names, policy reasons and the entire provider status list", async () => {
+it("shows all six enabled ready choices without a provider status list", async () => {
   setup();
   const { container } = render(<CuratorSettings theme={theme} />);
   await screen.findByRole("option", { name: "Claude" });
   expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent))
-    .toEqual(["None", "Claude", "Codex", "OpenCode"]);
-  for (const text of ["Oh My Pi", "Hermes", "Provider availability and safety", "Providers", "Loading providers", "review blocked",
+    .toEqual(["None", "Claude", "Codex", "GLM Agent", "Hermes", "Oh My Pi", "OpenCode"]);
+  for (const text of ["Provider availability and safety", "Providers", "Loading providers", "review blocked",
     "Paseo exposes approval modes", "no verified native read-only", "escalation disabled", "MCP tools denied"]) {
     expect(container.textContent).not.toContain(text);
   }
@@ -124,9 +126,9 @@ it("omits blocked names, policy reasons and the entire provider status list", as
   expect(container.querySelector("details")).toBeNull();
 });
 
-it("hides a saved blocked provider and its model without resetting consent", async () => {
+it("hides a saved unavailable provider and its model without resetting consent", async () => {
   const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
-  providers.listControls.mockResolvedValue({ ...await routingControls({ provider: "claude/model-a", cwd: "." }), options: {} });
+  providers.waitForReady.mockResolvedValue(routingSnapshot([]));
   const { container } = render(<CuratorSettings theme={theme} />);
   await screen.findByText(/Saved review provider is inactive/);
   expect(container.textContent).not.toMatch(/fallback/i);
@@ -161,7 +163,7 @@ it("logs a fixed discovery failure without exposing the thrown error", async () 
   expect(log.mock.calls.flat().join(" ")).not.toContain("PRIVATE-");
 });
 
-it("logs only bounded policy reasons, never host labels, models or raw failures", async () => {
+it("keeps ready providers selectable after model discovery errors without logging private failures", async () => {
   const log = vi.spyOn(console, "info").mockImplementation(() => {});
   const { providers } = setup();
   providers.waitForReady.mockResolvedValue(routingSnapshot([
@@ -171,8 +173,8 @@ it("logs only bounded policy reasons, never host labels, models or raw failures"
   providers.listModels.mockRejectedValue(new Error("PRIVATE-ERROR-TOKEN"));
   render(<CuratorSettings theme={theme} />);
   await waitFor(() => expect(screen.getByRole("button", { name: "Refresh providers" }).hasAttribute("disabled")).toBe(false));
-  expect(log.mock.calls.flat().join(" ")).toContain("Paseo exposes approval modes");
-  expect(log.mock.calls.flat().join(" ")).toContain("Provider discovery failed; refresh to retry.");
+  expect(screen.getByRole("option", { name: "PRIVATE-HOST-LABEL" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "PRIVATE-LABEL" })).toBeTruthy();
   expect(log.mock.calls.flat().join(" ")).not.toContain("PRIVATE-");
 });
 
