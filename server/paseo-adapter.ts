@@ -304,7 +304,7 @@ export class PaseoAdapter {
       // Prefer claude and codex (GPT) first; fall through to any other
       // available provider. No model IDs are hardcoded — listModels picks
       // the provider's own default.
-      const PREFERRED_FIRST = ["claude", "codex"];
+      const PREFERRED_FIRST = ["codex", "claude"];
       const sorted = [
         ...PREFERRED_FIRST.map(id => available.find(p => p.id === id)).filter(Boolean),
         ...available.filter(p => !PREFERRED_FIRST.includes(p.id)),
