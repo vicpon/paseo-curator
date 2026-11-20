@@ -58,7 +58,7 @@ export function CuratorSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
   }
   return (
     <SettingsSection title="Curator routing"
-      info="Reviews use the exact source provider and model when available. The selected provider is used when the source review cannot run. It receives a bounded source turn and skill index under its data policy; OpenCode reviews also receive captured skill text. This data can contain file contents and secrets. The reviewer uses the provider’s normal tool permissions and can execute native tools, including writes and commands. The no-write prompt is an instruction, not enforced confinement."
+      info="Reviews normally use the source agent’s provider and model. Your selection is used if that review cannot run. Review content may include file contents or secrets and is subject to the receiving provider’s data policy. The reviewer uses normal tool permissions."
       trailing={<Pressable accessibilityRole="button" accessibilityLabel="Refresh providers"
         accessibilityState={{ disabled: loading }} disabled={loading} onPress={() => setRefresh(value => value + 1)}
         style={({ pressed }) => ({ padding: 8, minHeight: 44, justifyContent: "center", opacity: loading || pressed ? 0.5 : 1 })}>

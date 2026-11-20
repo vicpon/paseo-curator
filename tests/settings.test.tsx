@@ -50,11 +50,13 @@ describe("routing settings UI", () => {
     await waitFor(() => expect(screen.getByRole("option", { name: "Claude" })).toBeTruthy());
     expect((screen.getByLabelText("Review provider") as HTMLSelectElement).value).toBe("");
     expect(screen.queryAllByRole("button", { name: "Unavailable" })).toHaveLength(0);
-    expect(screen.getByText(/selected provider is used when the source review cannot run/i)).toBeTruthy();
-    expect(screen.getByText(/bounded source turn.*skill index/)).toBeTruthy();
-    expect(screen.getByText(/file contents and secrets/)).toBeTruthy();
-    expect(screen.getByText(/normal tool permissions.*execute native tools/)).toBeTruthy();
-    expect(screen.getByText(/no-write.*instruction.*not enforced/i)).toBeTruthy();
+    expect(screen.getByText(/Your selection is used if that review cannot run/)).toBeTruthy();
+    expect(screen.getByText(/Reviews normally use the source agent’s provider and model/)).toBeTruthy();
+    expect(screen.getByText(/file contents or secrets/)).toBeTruthy();
+    expect(screen.getByText(/The reviewer uses normal tool permissions/)).toBeTruthy();
+    expect(screen.getByText(/receiving provider’s data policy/)).toBeTruthy();
+    expect(screen.queryByText(/OpenCode reviews also receive/)).toBeNull();
+    expect(screen.queryByText(/no-write.*instruction.*not enforced/i)).toBeNull();
     expect(save).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Review provider"), { target: { value: "claude" } });
     expect(save).toHaveBeenCalledWith({ fallbackProvider: "claude" }, "revision-1");
