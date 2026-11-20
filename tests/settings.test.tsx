@@ -1,37 +1,81 @@
-import { describe, expect, it, vi } from "vitest";
-import type { ReactElement } from "react";
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 
-const { useSettings, register } = vi.hoisted(() => ({ useSettings: vi.fn(), register: vi.fn() }));
-vi.mock("@getpaseo/plugin/client", () => ({ useSettings }));
-vi.mock("@getpaseo/plugin/client/ui", () => ({ SettingsSection: "section", SettingsSelect: "select", SettingsAction: "action" }));
+const { useSettings, usePaseo, register } = vi.hoisted(() => ({ useSettings: vi.fn(), usePaseo: vi.fn(), register: vi.fn() }));
+vi.mock("@getpaseo/plugin/client", () => ({ useSettings, usePaseo }));
+vi.mock("@getpaseo/plugin/client/ui", () => ({
+  SettingsSection: ({ title, info, children }: { title: string; info: string; children: ReactNode }) => <section><h1>{title}</h1><p>{info}</p>{children}</section>,
+  SettingsSelect: ({ label, value, options, onValueChange, disabled, error, hint }: { label: string; value: string; options: { value: string; label: string }[]; onValueChange: (value: string) => void; disabled?: boolean; error?: string; hint?: string }) => <label>{label}<select aria-label={label} value={value} disabled={disabled} onChange={e => onValueChange(e.target.value)}>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select><span>{hint}{error}</span></label>,
+  SettingsAction: ({ label, actionLabel, onPress, disabled, hint }: { label: string; actionLabel: string; onPress: () => void; disabled?: boolean; hint?: string }) => <div>{label}<p>{hint}</p><button disabled={disabled} onClick={onPress}>{actionLabel}</button></div>,
+  SettingsRow: ({ label, hint }: { label: string; hint?: string }) => <div>{label}<p>{hint}</p></div>,
+}));
 vi.mock("react-native", () => ({ Text: "text" }));
 
 import contribute from "../index.client";
 import { CuratorSettings } from "../client/settings";
-import { curatorSettings } from "../shared/settings";
 
-interface SelectProps {
-  label: string;
-  value: string;
-  onValueChange(value: string): void;
+afterEach(cleanup);
+function setup(values: { fallbackProvider?: string; fallbackModel?: string } = {}) {
+  const save = vi.fn();
+  const entries = ["omp", "claude", "codex", "hermes", "opencode"].map(provider => ({ provider, enabled: true, status: "available" }));
+  const providers = {
+    waitForReady: vi.fn(async () => ({ entries })),
+    listModels: vi.fn(async () => ({ models: [{ id: "model-a", label: "Model A" }, { id: "vendor/model-b", label: "Model B" }] })),
+    listControls: vi.fn(async (draft: { providerOptions: unknown }) => ({ options: draft.providerOptions })),
+    refresh: vi.fn(async () => ({})),
+  };
+  usePaseo.mockReturnValue({ providers });
+  useSettings.mockReturnValue({ status: "ready", revision: "revision-1", values, saving: false, save });
+  return { save, providers };
 }
 
-describe("routing settings", () => {
-  it("registers a user-editable settings screen and saves or clears fallback with the displayed revision", () => {
+describe("routing settings UI", () => {
+  it("shows discovered families, None default, truthful disabled safety status and transmission disclosure", async () => {
+    const { save } = setup();
     contribute({ addTimelineRenderer: () => {}, addSettingsScreen: register } as never);
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ Component: CuratorSettings }));
-    const save = vi.fn();
-    useSettings.mockReturnValue({ status: "ready", revision: "revision-1", values: {}, saving: false, save });
-    const view = CuratorSettings() as ReactElement<{ children: ReactElement | ReactElement[] }>;
-    const select = [view.props.children].flat().find(child => child?.props && (child.props as SelectProps).label === "Fallback provider") as ReactElement<SelectProps>;
-    expect(select.props.value).toBe("");
-    select.props.onValueChange("codex");
-    select.props.onValueChange("");
-    expect(save.mock.calls).toEqual([[{ fallbackProvider: "codex" }, "revision-1"], [{}, "revision-1"]]);
+    render(<CuratorSettings />);
+    await waitFor(() => expect(screen.getByRole("option", { name: "claude" })).toBeTruthy());
+    expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("");
+    expect(screen.getAllByRole("button", { name: "Unavailable" })).toHaveLength(3);
+    expect(screen.getByText(/source turn.*skill index.*selected provider/i)).toBeTruthy();
+    expect(screen.getByText(/file contents and secrets/)).toBeTruthy();
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "claude" } });
+    expect(save).toHaveBeenCalledWith({ fallbackProvider: "claude" }, "revision-1");
   });
-
-  it("rejects unavailable or unknown fallback policies rather than accepting arbitrary providers", () => {
-    expect(curatorSettings.schema.safeParse({ fallbackProvider: "codex" }).success).toBe(true);
-    expect(curatorSettings.schema.safeParse({ fallbackProvider: "omp" }).success).toBe(false);
+  it("preserves the selected provider and nested model across refresh, disappearance and discovery failure", async () => {
+    const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
+    render(<CuratorSettings />);
+    await waitFor(() => expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b"));
+    providers.waitForReady.mockResolvedValue({ entries: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
+    await waitFor(() => expect(screen.getByRole("option", { name: /claude.*unavailable/ })).toBeTruthy());
+    expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b");
+    providers.waitForReady.mockRejectedValue(new Error("connection lost"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
+    await screen.findByText(/Provider discovery failed/);
+    expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("claude");
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+    expect(save).toHaveBeenCalledWith({}, "revision-1");
+  });
+  it("saves explicit model changes and can clear fallback while discovery is pending", async () => {
+    const { save } = setup({ fallbackProvider: "codex" });
+    render(<CuratorSettings />);
+    await screen.findByRole("option", { name: "Model B" });
+    fireEvent.change(screen.getByLabelText("Fallback model"), { target: { value: "vendor/model-b" } });
+    expect(save).toHaveBeenCalledWith({ fallbackProvider: "codex", fallbackModel: "vendor/model-b" }, "revision-1");
+    fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+    expect(save).toHaveBeenLastCalledWith({}, "revision-1");
+  });
+  it("displays invalid settings and saving errors without silently resetting consent", () => {
+    setup();
+    useSettings.mockReturnValue({ status: "invalid", revision: "bad", error: "Invalid settings", reset: vi.fn() });
+    render(<CuratorSettings />);
+    expect(screen.getByText("Invalid settings")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reset fallback" })).toBeTruthy();
   });
 });

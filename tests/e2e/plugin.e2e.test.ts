@@ -82,9 +82,9 @@ describe("curator plugin end to end", () => {
     const results = new Map<string, string>();
     const adapter = new PaseoAdapter({
       providers: {
-        waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+        waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }] }),
         listModels: async () => ({ models: [] }),
-        listModes: async () => ({ modes: [{ id: "read-only", label: "Read only" }] }),
+        listControls: async (draft: { providerOptions: Record<string, unknown> }) => ({ options: draft.providerOptions }),
       },
       agents: {
         ref: () => { throw new Error("unused"); },
@@ -159,7 +159,9 @@ describe("curator plugin end to end", () => {
     };
     const paseo = {
       providers: {
-        listModes: async () => ({ modes: [{ id: "read-only", label: "Read only" }] }),
+        waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }] }),
+        listModels: async () => ({ models: [] }),
+        listControls: async (draft: { providerOptions: Record<string, unknown> }) => ({ options: draft.providerOptions }),
       },
       agents: {
         list: async () => ({ entries: [], pageInfo: {}, requestId: "req-1" }),

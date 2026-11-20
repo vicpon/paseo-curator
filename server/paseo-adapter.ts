@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 
 import type { TimelineEntry } from "./review-prompt";
 import { registerCuratorAgentId } from "./curator-agents";
+import { resolveReadOnlyConfig, type RoutingProviders, type ReadOnlyConfig } from "../shared/routing";
+import { routingSettingsSchema } from "../shared/settings";
 
 // ---------------------------------------------------------------------------
 // Paseo API surface
@@ -47,28 +49,18 @@ export interface PaseoApiRef {
     };
     readonly create: (options: CreateAgentOptions) => Promise<AgentHandle>;
   };
-  readonly providers?: {
-    readonly waitForReady: (options?: { timeoutMs?: number }) => Promise<{
-      readonly providers: ReadonlyArray<{ readonly id: string; readonly available: boolean }>;
-    }>;
-    readonly listModes: (provider: string) => Promise<{
-      readonly modes: ReadonlyArray<{ readonly id: string; readonly label: string }>;
-    }>;
-    readonly listModels: (provider: string) => Promise<{
-      readonly models: ReadonlyArray<{ readonly id: string; readonly label: string; readonly isDefault?: boolean }>;
-    }>;
-  };
+  readonly providers?: RoutingProviders;
 }
 
 interface CuratorRoute {
-  providerSelection: string;
-  modeId: string;
+  config: ReadOnlyConfig;
+  consent?: { fallbackProvider: string; fallbackModel?: string };
 }
 
 export interface RoutingSettings {
   read(): Promise<{
     status: "ready" | "invalid";
-    values?: { fallbackProvider?: string };
+    values?: { fallbackProvider?: string; fallbackModel?: string };
   }>;
 }
 
@@ -146,7 +138,7 @@ export interface RecoveredCompletedTurn {
  */
 export interface CreateAgentOptions {
   readonly agentId: string;
-  readonly config: { readonly provider: string; readonly modeId?: string };
+  readonly config: ReadOnlyConfig;
   readonly cwd: string;
   readonly parent: string;
   readonly prompt: string;
@@ -285,40 +277,41 @@ export class PaseoAdapter {
     private readonly settings?: RoutingSettings,
   ) {}
 
-  private async restrictedMode(providerId: string): Promise<string | null> {
-    // Codex read-only sets a native read-only sandbox; labels and approval hooks alone do not.
-    if (providerId !== "codex" || !this.paseo.providers) return null;
+  private async providerEnabled(provider: string): Promise<boolean> {
     try {
-      const { modes } = await this.paseo.providers.listModes(providerId);
-      return modes.some(mode => mode.id === "read-only") ? "read-only" : null;
-    } catch {
-      return null;
-    }
+      const snapshot = await this.paseo.providers?.waitForReady({ timeoutMs: 10_000 });
+      return snapshot?.entries.some(entry => entry.provider === provider && entry.enabled && entry.status === "available") ?? false;
+    } catch { return false; }
   }
 
-  private async resolveFallbackProvider(): Promise<CuratorRoute | null> {
-    const providerId = await this.readFallbackSetting();
-    if (!providerId || !this.paseo.providers) return null;
-    const modeId = await this.restrictedMode(providerId);
-    if (!modeId) return null;
+  private async sourceRoute(selection: string | null, cwd: string): Promise<CuratorRoute | null> {
+    if (!selection || !this.paseo.providers || !await this.providerEnabled(selection.split("/")[0])) return null;
+    const config = await resolveReadOnlyConfig(this.paseo.providers, selection, cwd);
+    return config ? { config } : null;
+  }
+
+  private async resolveFallbackProvider(cwd: string): Promise<CuratorRoute | null> {
+    const consent = await this.readFallbackSetting();
+    if (!consent || !this.paseo.providers || !await this.providerEnabled(consent.fallbackProvider)) return null;
     try {
-      const { models } = await this.paseo.providers.listModels(providerId);
-      const model = models.find(model => model.isDefault)?.id ?? models[0]?.id;
+      const { models, error } = await this.paseo.providers.listModels(consent.fallbackProvider);
+      if (error) return null;
+      const model = consent.fallbackModel === undefined
+        ? models?.find(model => model.isDefault)?.id ?? models?.[0]?.id
+        : models?.find(model => model.id === consent.fallbackModel)?.id;
       if (!model) return null;
-      return { providerSelection: `${providerId}/${model}`, modeId };
-    } catch {
-      return null;
-    }
+      const config = await resolveReadOnlyConfig(this.paseo.providers, `${consent.fallbackProvider}/${model}`, cwd);
+      return config ? { config, consent } : null;
+    } catch { return null; }
   }
 
-  private async readFallbackSetting(): Promise<string | undefined> {
+  private async readFallbackSetting(): Promise<CuratorRoute["consent"]> {
     try {
       const state = await this.settings?.read();
-      return state?.status === "ready" && state.values?.fallbackProvider === "codex"
-        ? state.values.fallbackProvider : undefined;
-    } catch {
-      return undefined;
-    }
+      const values = state?.status === "ready" ? routingSettingsSchema.safeParse(state.values) : null;
+      return values?.success && values.data.fallbackProvider
+        ? { fallbackProvider: values.data.fallbackProvider, ...(values.data.fallbackModel ? { fallbackModel: values.data.fallbackModel } : {}) } : undefined;
+    } catch { return undefined; }
   }
 
   async listLoadedSkillNames(agentId: string): Promise<string[]> {
@@ -553,30 +546,28 @@ export class PaseoAdapter {
     reviewId?: string,
   ): Promise<CuratorRunResult> {
     const provider = sourceAgent.provider.trim();
-    const providerId = provider.split("/")[0];
     const selection = provider.includes("/") ? provider
       : sourceAgent.model?.trim() ? `${provider}/${sourceAgent.model.trim()}` : null;
-    const modeId = selection ? await this.restrictedMode(providerId) : null;
-    let route: CuratorRoute | null = selection && modeId ? { providerSelection: selection, modeId } : null;
-    let usedFallback = false;
-    if (!route) {
-      route = await this.resolveFallbackProvider();
-      usedFallback = true;
-    }
+    let route = await this.sourceRoute(selection, sourceAgent.cwd);
+    if (!route) route = await this.resolveFallbackProvider(sourceAgent.cwd);
     if (!route) throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
 
-    const create = async (selected: CuratorRoute, fallback: boolean) => {
-      if (fallback && await this.readFallbackSetting() !== selected.providerSelection.split("/")[0]) {
+    const create = async (selected: CuratorRoute) => {
+      // Re-check after every asynchronous lookup, immediately before sending the prompt.
+      if (!await this.providerEnabled(selected.config.provider.split("/")[0])) {
+        throw curatorError(sourceAgent.id, turnId, "provider-unavailable");
+      }
+      if (selected.consent && JSON.stringify(await this.readFallbackSetting()) !== JSON.stringify(selected.consent)) {
         throw curatorError(sourceAgent.id, turnId, "fallback-unavailable");
       }
-      const routeKey = `${selected.providerSelection}:${selected.modeId}`;
+      const routeKey = `${selected.config.provider}:${createHash("sha256").update(JSON.stringify(selected.config)).digest("hex").slice(0, 16)}`;
       const reviewKey = reviewId === undefined ? turnId : JSON.stringify([turnId, reviewId]);
       const agentId = deriveCuratorAgentId(sourceAgent.id, `${reviewKey}:${routeKey}`);
       const unregister = registerCuratorAgentId(agentId);
       try {
         const handle = await this.paseo.agents.create({
           agentId,
-          config: { provider: selected.providerSelection, modeId: selected.modeId },
+          config: selected.config,
           cwd: sourceAgent.cwd,
           parent: sourceAgent.id,
           prompt,
@@ -596,13 +587,13 @@ export class PaseoAdapter {
 
     let created: Awaited<ReturnType<typeof create>>;
     try {
-      created = await create(route, usedFallback);
+      created = await create(route);
     } catch {
-      const fallback = usedFallback ? null : await this.resolveFallbackProvider();
-      if (!fallback || fallback.providerSelection === route.providerSelection) {
+      const fallback = route.consent ? null : await this.resolveFallbackProvider(sourceAgent.cwd);
+      if (!fallback || fallback.config.provider === route.config.provider) {
         throw curatorError(sourceAgent.id, turnId, "create-failed");
       }
-      created = await create(fallback, true);
+      created = await create(fallback);
     }
     const { handle, unregister: unregisterCurator } = created;
 

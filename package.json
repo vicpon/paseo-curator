@@ -10,6 +10,7 @@
     "README.md",
     "OVERVIEW.md",
     "OVERVIEW.*.md",
+    "docs/routing.md",
     "index.client.tsx",
     "index.server.ts",
     "client/",
@@ -20,7 +21,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "preview:settings": "vite --config tests/ui/vite.config.ts"
   },
   "engines": {
     "node": ">=22"
@@ -31,11 +33,16 @@
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.16.0-beta.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.6",
     "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.3.0",
+    "jsdom": "^31.0.1",
     "react": "^19.1.0",
+    "react-dom": "^19.1.0",
     "react-native": "^0.81.5",
     "typescript": "^5.9.3",
+    "vite": "^7.3.8",
     "vitest": "^3.2.0"
   },
   "peerDependencies": {

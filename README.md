@@ -18,7 +18,7 @@ The curator returns structured proposals such as "create this skill," "replace t
 - Paseo `0.16.0-beta.2` or later
 - Node.js 22 or later (`node:sqlite`)
 
-Reviews currently require Codex to advertise the exact `read-only` mode. The plugin preserves the source provider/model when that route supports this policy. Daemons whose Codex modes are only `auto`, `auto-review`, and `full-access` cannot run reviews. OMP `ask` and other provider modes are rejected because their labels or permission hooks do not establish native write confinement.
+Reviews preserve the exact source provider/model when native read-only controls are available. Codex uses its native read-only sandbox; Claude exposes only Read, Glob and Grep and denies all MCP tools. Session mode names are not used as safety controls. Other installed providers remain visible with an unavailable reason. See [routing controls and acceptance matrix](docs/routing.md).
 
 ## Install
 
@@ -72,7 +72,9 @@ The plugin runs its learning pipeline on the server and adds a small client rend
 
 ## Configuration
 
-In Settings → Plugins → Curator, **Fallback provider** is user-editable and host-scoped. **None** (default) disables fallback; **Codex (read-only)** explicitly authorizes sending the review prompt to Codex's default model if the source route is unavailable or lacks a supported policy. The setting is read fresh before fallback routing. Clearing, invalidating, or failing to read settings prevents subsequent fallback sends; it cannot recall submitted reviews. Older arbitrary provider values are invalid and can be reset in this screen.
+In Settings → Plugins → Curator, **Fallback provider** discovers the host's catalog. **None** (default) disables fallback. Selecting an enabled, available provider with supported native controls explicitly authorizes transmission to that provider when the exact source route cannot run. **Fallback model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both selections, including unavailable ones, without saving. Unsupported providers have disabled controls and specific reasons.
+
+Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum, but unknown native policies still fail closed.
 
 Other values remain built in:
 
@@ -82,7 +84,7 @@ Other values remain built in:
 | State database | `~/.paseo/plugins/curator/curator.sqlite` |
 | Review cadence | 10 unique tool iterations |
 | Curator provider | Exact source route when supported; explicit fallback only |
-| Curator mode | Codex `read-only`, only when advertised |
+| Curator confinement | Provider-native sandbox or restricted read-only tools |
 | Curator concurrency | 1 |
 | Maximum operations per review | 20 |
 | Maximum retries | 3 |
@@ -90,7 +92,7 @@ Other values remain built in:
 | Archive curator-created skills | 30 inactive days |
 | Consolidation | Disabled |
 
-Overrides for the built-in values require a source change and plugin reload. Fallback does not discover other providers automatically. If no permitted route exists, the attempt raises `source-model-unavailable`, retries within the existing budget, and eventually fails with a timeline notice. This is not a successful skip or a `nothing_to_save` verdict.
+Overrides for the built-in values require a source change and plugin reload. Fallback never selects another provider automatically. If no permitted route exists, the attempt raises `source-model-unavailable`, retries within the existing budget, and eventually fails with a timeline notice. This is not a successful skip or a `nothing_to_save` verdict.
 
 Durable state includes cadence counters, queue claims and retries, reconciliation cursor, skill telemetry, and a content-free audit log. Migration preserves existing `nothing_to_save` outcomes and future exact outcomes, but cannot reconstruct no-op records that older versions already discarded or rewrote. Applied-batch intents and receipts live under `.paseo-curator/` inside the skill root.
 
@@ -159,12 +161,12 @@ A successful review ends with queue status `nothing_to_save` or `applied`. An `a
 - A pre-mutation intent journal reconciles crashes between filesystem commit and SQLite queue completion without rerunning nondeterministic curator output.
 - Queue claims use attempt-generation fencing; stale attempts cannot complete newer claims and are checked during filesystem application.
 - Timeline reset, gap, stale cursor, epoch changes, and non-progressing pagination are rejected.
-- Curator agents are excluded from their own lifecycle. The plugin requests the exact Codex `read-only` mode and refuses unknown modes. Its permission guard denies requests that reach Paseo; this hook alone does not confine native tools. Agent IDs include the route and queue attempt and are registered before creation. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. No live provider confinement test was performed for this change.
+- Curator agents are excluded from their own lifecycle. The plugin requests verified native confinement options and refuses providers without them. Its permission guard denies requests that reach Paseo; this hook alone does not confine native tools. Agent IDs include the route and queue attempt and are registered before creation. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. No live provider confinement test was performed for this change.
 - Source-turn entries and skill-index descriptions are explicitly delimited as untrusted data; curator agents are instructed never to execute quoted commands or tasks.
 - Automatic maintenance archives only skills whose frontmatter says `created_by: paseo-curator`. User and externally installed skills are protected from archival, but reviews can patch them or remove their support files.
 - Prompts, transcripts, raw model output, secrets, and PII are not persisted in errors or audit records.
 
-The policy allowlist is intentionally narrow. Paseo's [Codex mode implementation](https://github.com/getpaseo/paseo/blob/c853f98b906523328de1af2a96932cba565077f5/packages/server/src/server/agent/providers/codex-app-server-agent.ts#L370) sets `approvalPolicy: on-request`, `sandbox: read-only`, and `approvalsReviewer: user`. Its [OMP mapping](https://github.com/getpaseo/paseo/blob/c853f98b906523328de1af2a96932cba565077f5/packages/server/src/server/agent/providers/omp/provider-config.ts#L53) requests `always-ask`, but the inspected installed OMP approval implementation permits tool/user allow policies to bypass prompts. Those policies cannot be verified or confined through this plugin's SDK surface, so OMP is excluded. This source inspection is not an end-to-end sandbox test. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; the new version checks do compare raw bytes.
+Native controls and their inspected upstream implementations are documented in the [routing acceptance matrix](docs/routing.md). Source inspection and adapter tests do not establish live provider confinement; no live review or plugin reload was performed for this change. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; version checks compare raw bytes.
 
 ## Recovery behavior
 
