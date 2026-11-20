@@ -18,7 +18,7 @@ The curator returns structured proposals such as "create this skill," "replace t
 - Paseo `0.16.0-beta.2` or later
 - Node.js 22 or later (`node:sqlite`)
 
-Reviews preserve the exact source provider/model when native read-only controls are available. Codex uses its native read-only sandbox; Claude exposes only Read, Glob and Grep and denies all MCP tools. Session mode names are not used as safety controls. OpenCode denies all native and MCP tools and receives bounded captured skill text from the plugin. Only enabled host providers are shown; availability and curator safety are separate. See [routing controls and acceptance matrix](docs/routing.md).
+Reviews preserve the exact source provider/model when native read-only controls are available. Codex uses its native read-only sandbox; Claude exposes only Read, Glob and Grep and denies all MCP tools. Session mode names are not used as safety controls. OpenCode denies all native and MCP tools and receives bounded captured skill text from the plugin. Settings offer only usable enabled providers. See [routing controls and acceptance matrix](docs/routing.md).
 
 ## Install
 
@@ -72,7 +72,7 @@ The plugin runs its learning pipeline on the server and adds a small client rend
 
 ## Configuration
 
-In Settings → Plugins → Curator, **Fallback provider** discovers the host's catalog. **None** (default) disables fallback. Selecting an enabled, available provider with supported native controls explicitly authorizes transmission to that provider when the exact source route cannot run. **Fallback model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both selections, including unavailable ones, without saving. Ready providers with unsupported curator policies show a review-blocked reason. Host-disabled entries disappear from the list and selector; a saved inactive choice is preserved without substitution.
+In Settings → Plugins → Curator, **Fallback provider** offers usable enabled providers from the host's catalog. **None** (default) disables fallback. Selecting a provider explicitly authorizes transmission to that provider when the exact source route cannot run. **Fallback model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both saved selections without saving. Blocked and host-disabled providers are hidden, including their model controls. A saved inactive choice uses a generic placeholder without substitution. Fixed technical blocker reasons remain in the app runtime console for troubleshooting; host labels, models and raw errors are not logged.
 
 Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum, but unknown native policies still fail closed.
 

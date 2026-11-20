@@ -9,7 +9,7 @@ const { useSettings, usePaseo, register } = vi.hoisted(() => ({ useSettings: vi.
 vi.mock("@getpaseo/plugin/client", () => ({ useSettings, usePaseo }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({
   SettingsSection: ({ title, info, children }: { title: string; info: string; children: ReactNode }) => <section><h1>{title}</h1><p>{info}</p>{children}</section>,
-  SettingsSelect: ({ label, value, options, onValueChange, disabled, error, hint }: { label: string; value: string; options: { value: string; label: string }[]; onValueChange: (value: string) => void; disabled?: boolean; error?: string; hint?: string }) => <label>{label}<select aria-label={label} value={value} disabled={disabled} onChange={e => onValueChange(e.target.value)}>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select><span>{hint}{error}</span></label>,
+  SettingsSelect: ({ label, value, options, onValueChange, disabled, error, hint }: { label: string; value: string; options: { value: string; label: string }[]; onValueChange: (value: string) => void; disabled?: boolean; error?: string; hint?: string }) => <label>{label}{!options.some(o => o.value === value) && <span>{value}</span>}<select aria-label={label} value={value} disabled={disabled} onChange={e => onValueChange(e.target.value)}>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select><span>{hint}{error}</span></label>,
   SettingsAction: ({ label, actionLabel, onPress, disabled, hint }: { label: string; actionLabel: string; onPress: () => void; disabled?: boolean; hint?: string }) => <div>{label}<p>{hint}</p><button disabled={disabled} onClick={onPress}>{actionLabel}</button></div>,
   SettingsRow: ({ label, hint }: { label: string; hint?: string }) => <div>{label}<p>{hint}</p></div>,
 }));
@@ -18,7 +18,7 @@ vi.mock("react-native", () => ({ Text: "text" }));
 import contribute from "../index.client";
 import { CuratorSettings } from "../client/settings";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 function setup(values: { fallbackProvider?: string; fallbackModel?: string } = {}) {
   const save = vi.fn();
   const entries = liveSnapshot.entries.filter(entry => ["omp", "claude", "codex", "hermes", "opencode"].includes(entry.provider));
@@ -34,7 +34,7 @@ function setup(values: { fallbackProvider?: string; fallbackModel?: string } = {
 }
 
 describe("routing settings UI", () => {
-  it("shows discovered families, None default, truthful disabled safety status and transmission disclosure", async () => {
+  it("shows usable choices, None default and transmission disclosure", async () => {
     const { save } = setup();
     contribute({ addTimelineRenderer: () => {}, addSettingsScreen: register } as never);
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ Component: CuratorSettings }));
@@ -54,12 +54,12 @@ describe("routing settings UI", () => {
     await waitFor(() => expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b"));
     providers.waitForReady.mockResolvedValue(routingSnapshot([]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
-    await waitFor(() => expect(screen.getByRole("option", { name: "Saved fallback inactive" })).toBeTruthy());
+    await screen.findByText(/Saved fallback is inactive/);
     expect(screen.queryByLabelText("Fallback model")).toBeNull();
     providers.waitForReady.mockRejectedValue(new Error("connection lost"));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
     await screen.findByText(/Provider discovery failed/);
-    expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("__inactive__");
+    expect(screen.queryByRole("option", { name: /saved|claude/i })).toBeNull();
     expect(save).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
     expect(save).toHaveBeenCalledWith({}, "revision-1");
@@ -99,12 +99,67 @@ it("removes host-disabled providers from rows and selector on refresh without ch
   expect(save).toHaveBeenCalledWith({}, "revision-1");
 });
 
-it("does not describe ready providers with unsupported curator policies as unavailable", async () => {
+it("omits blocked names, policy reasons and the entire provider status list", async () => {
   setup();
-  render(<CuratorSettings />);
+  const { container } = render(<CuratorSettings />);
   await screen.findByRole("option", { name: "Claude" });
-  expect(screen.queryByRole("button", { name: "Unavailable" })).toBeNull();
-  expect(screen.getAllByText(/Ready.*review blocked/)).toHaveLength(2);
+  expect(Array.from(screen.getByLabelText("Fallback provider").querySelectorAll("option"), o => o.textContent))
+    .toEqual(["None", "Claude", "Codex", "OpenCode"]);
+  for (const text of ["Oh My Pi", "Hermes", "Provider availability and safety", "review blocked",
+    "Paseo exposes approval modes", "no verified native read-only", "escalation disabled", "MCP tools denied"]) {
+    expect(container.textContent).not.toContain(text);
+  }
+  expect(container.querySelector("details")).toBeNull();
+});
+
+it("hides a saved blocked provider and its model without resetting consent", async () => {
+  const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
+  providers.listControls.mockResolvedValue({ ...await routingControls({ provider: "claude/model-a", cwd: "." }), options: {} });
+  render(<CuratorSettings />);
+  await screen.findByText(/Saved fallback is inactive/);
+  expect(Array.from(screen.getByLabelText("Fallback provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
+  expect(screen.queryByText("Claude")).toBeNull();
+  expect(screen.queryByLabelText("Fallback model")).toBeNull();
+  expect(screen.queryByText(/model-b/)).toBeNull();
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+  expect(save).toHaveBeenCalledWith({}, "revision-1");
+});
+
+it("offers only None while checking a saved route and lets None revoke immediately", () => {
+  const { providers, save } = setup({ fallbackProvider: "hermes", fallbackModel: "private/model" });
+  providers.waitForReady.mockReturnValue(new Promise(() => {}));
+  render(<CuratorSettings />);
+  expect(Array.from(screen.getByLabelText("Fallback provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
+  expect(screen.queryByLabelText("Fallback model")).toBeNull();
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("Fallback provider"), { target: { value: "" } });
+  expect(save).toHaveBeenCalledWith({}, "revision-1");
+});
+
+it("logs a fixed discovery failure without exposing the thrown error", async () => {
+  const log = vi.spyOn(console, "info").mockImplementation(() => {});
+  const { providers } = setup();
+  providers.waitForReady.mockRejectedValue(new Error("PRIVATE-DISCOVERY-TOKEN"));
+  render(<CuratorSettings />);
+  await screen.findByText(/Provider discovery failed/);
+  expect(log.mock.calls.flat().join(" ")).toContain("Provider discovery failed");
+  expect(log.mock.calls.flat().join(" ")).not.toContain("PRIVATE-");
+});
+
+it("logs only bounded policy reasons, never host labels, models or raw failures", async () => {
+  const log = vi.spyOn(console, "info").mockImplementation(() => {});
+  const { providers } = setup();
+  providers.waitForReady.mockResolvedValue(routingSnapshot([
+    { provider: "omp", label: "PRIVATE-HOST-LABEL", enabled: true, status: "ready" },
+    { provider: "claude", label: "PRIVATE-LABEL", enabled: true, status: "ready" },
+  ]));
+  providers.listModels.mockRejectedValue(new Error("PRIVATE-ERROR-TOKEN"));
+  render(<CuratorSettings />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh providers" }).hasAttribute("disabled")).toBe(false));
+  expect(log.mock.calls.flat().join(" ")).toContain("Paseo exposes approval modes");
+  expect(log.mock.calls.flat().join(" ")).toContain("Provider discovery failed; refresh to retry.");
+  expect(log.mock.calls.flat().join(" ")).not.toContain("PRIVATE-");
 });
 
 

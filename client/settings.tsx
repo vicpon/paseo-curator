@@ -19,9 +19,18 @@ export function CuratorSettings() {
     void (async () => {
       if (refresh > 0) await paseo.providers.refresh();
       const next = await discoverRoutingProviders(paseo.providers);
-      if (!disposed) setCatalog(next);
+      if (!disposed) {
+        // Reasons are fixed discovery messages; never log host labels, models or raw errors.
+        for (const item of next.filter(p => !p.supported)) {
+          console.info("[curator] Provider omitted from fallback choices:", item.reason);
+        }
+        setCatalog(next.filter(p => p.supported));
+      }
     })().catch(() => {
-      if (!disposed) setError("Provider discovery failed. Refresh to retry; your selection is preserved.");
+      if (!disposed) {
+        console.info("[curator] Provider discovery failed; refresh to retry.");
+        setError("Provider discovery failed. Refresh to retry; your selection is preserved.");
+      }
     }).finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
   }, [paseo, refresh]);
@@ -39,7 +48,8 @@ export function CuratorSettings() {
   const provider = catalog.find(p => p.id === selected);
   const options = catalog.filter(p => p.supported).map(p => ({ label: p.label, value: p.id }));
   const inactive = !!selected && !options.some(p => p.value === selected);
-  if (inactive) options.unshift({ label: loading ? "Saved fallback (checking host)" : "Saved fallback inactive", value: "__inactive__" });
+  // Paseo displays an unmatched value as the trigger caption, without adding a menu choice.
+  const providerValue = inactive ? (loading ? "Saved fallback (checking host)" : "Saved fallback inactive") : selected ?? "";
   const models = provider?.models.map(model => ({ label: model.label, value: model.id })) ?? [];
   const selectedModel = state.values.fallbackModel;
   if (selectedModel && !models.some(m => m.value === selectedModel)) {
@@ -47,9 +57,9 @@ export function CuratorSettings() {
   }
   return (
     <SettingsSection title="Curator routing"
-      info="Fallback sends the bounded source turn and skill index to your selected provider under its data policy. OpenCode also receives bounded captured skill text with all tools denied. The turn and skill text can contain file contents and secrets. Read-only tools can read workspace and skill files. None disables cross-provider transmission; source reviews use the exact source provider and model when safe.">
-      <SettingsSelect label="Fallback provider" value={inactive ? "__inactive__" : selected ?? ""}
-        hint="Only your explicit choice enables fallback. Only enabled host providers are shown. None revokes fallback, including during refresh."
+      info="Reviews use the source provider and model when safe. Fallback sends a bounded source turn and skill index to your selected provider under its data policy; tool-less reviews also receive captured skill text. This data can contain file contents and secrets. Read-only tools can read workspace and skill files.">
+      <SettingsSelect label="Fallback provider" value={providerValue}
+        hint="Used only when the source route cannot run. Choose a provider to allow fallback; None revokes it."
         options={[{ label: "None", value: "" }, ...options]}
         disabled={state.saving} error={state.saveError}
         onValueChange={value => {
@@ -58,9 +68,9 @@ export function CuratorSettings() {
             void state.save({ fallbackProvider: value }, state.revision);
           }
         }} />
-      {inactive && !loading && <SettingsRow label="Saved fallback is inactive; reviews cannot use it. Choose an enabled supported provider or None. The saved choice is preserved." />}
+      {inactive && !loading && <SettingsRow label="Saved fallback is inactive. Choose a provider or None; your saved choice is preserved." />}
       {selected && provider && <SettingsSelect label="Fallback model" value={selectedModel ?? ""}
-        hint="Provider default follows that provider's current default model. An explicit model is preserved on refresh; unavailable selections fail closed. Changing this model changes where review data is sent."
+        hint="Use the provider default or pin a model. Refresh preserves your choice; unavailable models cannot run."
         options={[{ label: "Provider default", value: "" }, ...models]}
         disabled={state.saving || loading || !!error || !provider?.supported}
         onValueChange={value => {
@@ -68,10 +78,8 @@ export function CuratorSettings() {
             void state.save({ fallbackProvider: selected, ...(value ? { fallbackModel: value } : {}) }, state.revision);
           }
         }} />}
-      <SettingsAction label={loading ? "Loading providers" : error ?? "Provider availability and safety"}
+      <SettingsAction label={loading ? "Loading providers" : error ?? "Providers"}
         actionLabel="Refresh providers" disabled={loading} onPress={() => setRefresh(value => value + 1)} />
-      {catalog.map(item => <SettingsRow key={item.id} label={item.label}
-        hint={`${item.available ? "Ready" : "Unavailable on host"}${item.supported ? "" : "; review blocked"}. ${item.reason}`} />)}
     </SettingsSection>
   );
 }

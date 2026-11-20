@@ -3,10 +3,11 @@
 ## Current contract
 
 PR7 discovers the authenticated host SDK catalog (`entries`, `provider`, `enabled`,
-`status: "ready"`). Only enabled entries are returned, listed, or offered as providers.
-A provider's host availability is separate from whether Curator can enforce its safety policy.
-A ready family without supported controls says **Ready; review blocked**, with a reason.
-A failed refresh clears stale ready rows and provider choices.
+`status: "ready"`). Discovery returns only enabled entries. Settings offer only usable
+providers and None; there is no provider availability/safety list or collapsed diagnostic view.
+Blocked names, models and reasons are absent from normal settings. Fixed technical reasons
+are logged in the app runtime console without host labels, models or raw errors.
+A failed refresh clears stale provider choices.
 
 Source reviews retain the exact provider/model, including nested model IDs. Fallback is only
 the explicitly saved provider/model; **None is the default**. No provider preference order is
@@ -132,8 +133,8 @@ harness evidence and are not native UI evidence.
 Native UAT after the authorized exact-SHA checkout update and curator-only reload:
 
 1. Open native Settings → Plugins → Curator on host `vpc`.
-2. Verify only enabled families appear. Ready OMP/Hermes/GLM show review-blocked safety reasons;
-   Codex/Claude/OpenCode show their policies. Disabled Pi/Copilot/etc. are absent.
+2. Verify the settings show the fallback control and refresh action, with no provider status
+   list or diagnostic disclosure. Blocked OMP/Hermes/GLM and disabled families are absent.
 3. Open fallback menu: None and supported enabled routes only. None remains the saved default.
 4. Refresh: selection is preserved without a settings save. A host-disabled saved route is
    omitted from the menu; its generic inactive placeholder cannot authorize another route.
