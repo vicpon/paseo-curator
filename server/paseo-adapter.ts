@@ -60,6 +60,18 @@ export interface PaseoApiRef {
   };
 }
 
+interface CuratorRoute {
+  providerSelection: string;
+  modeId: string;
+}
+
+export interface RoutingSettings {
+  read(): Promise<{
+    status: "ready" | "invalid";
+    values?: { fallbackProvider?: string };
+  }>;
+}
+
 /** A single agent snapshot with the fields the adapter captures. */
 export interface SourceAgent {
   readonly id: string;
@@ -268,76 +280,45 @@ function formatToolCall(
  * reports no older pages.
  */
 export class PaseoAdapter {
-  /** Cached fallback provider/model selection for non-creatable source providers. */
-  private fallbackProviderSelection: string | null | undefined = undefined;
-
   constructor(
     private readonly paseo: PaseoApiRef,
+    private readonly settings?: RoutingSettings,
   ) {}
 
-  /**
-   * Discover a fallback provider/model to use when the source agent's
-   * provider cannot create a daemon-side curator agent. Queries all available
-   * providers dynamically — no provider names are hardcoded. Prefers a mode
-   * whose label contains "ask" (case-insensitive) as a heuristic for the most
-   * restricted available mode; falls back to the provider's default mode when
-   * no ask-labelled mode exists. The plugin-owned permission guard provides
-   * the real write-safety enforcement regardless of mode. Caches the result so
-   * discovery only runs once per adapter lifetime.
-   */
-  private async discoverFallbackProvider(): Promise<{ providerSelection: string; modeId: string | undefined } | null> {
-    if (this.fallbackProviderSelection !== undefined) {
-      if (this.fallbackProviderSelection === null) return null;
-      const [providerSelection, modeId] = this.fallbackProviderSelection.split("|");
-      return { providerSelection: providerSelection!, modeId: modeId || undefined };
-    }
-
-    if (!this.paseo.providers) {
-      this.fallbackProviderSelection = null;
+  private async restrictedMode(providerId: string): Promise<string | null> {
+    // Codex read-only sets a native read-only sandbox; labels and approval hooks alone do not.
+    if (providerId !== "codex" || !this.paseo.providers) return null;
+    try {
+      const { modes } = await this.paseo.providers.listModes(providerId);
+      return modes.some(mode => mode.id === "read-only") ? "read-only" : null;
+    } catch {
       return null;
     }
+  }
 
+  private async resolveFallbackProvider(): Promise<CuratorRoute | null> {
+    const providerId = await this.readFallbackSetting();
+    if (!providerId || !this.paseo.providers) return null;
+    const modeId = await this.restrictedMode(providerId);
+    if (!modeId) return null;
     try {
-      const snap = await this.paseo.providers.waitForReady({ timeoutMs: 10_000 });
-      const available = snap.providers.filter(p => p.available);
-
-      // Prefer claude and codex (GPT) first; fall through to any other
-      // available provider. No model IDs are hardcoded — listModels picks
-      // the provider's own default.
-      const PREFERRED_FIRST = ["codex", "claude"];
-      const sorted = [
-        ...PREFERRED_FIRST.map(id => available.find(p => p.id === id)).filter(Boolean),
-        ...available.filter(p => !PREFERRED_FIRST.includes(p.id)),
-      ] as typeof available;
-
-      for (const p of sorted) {
-        try {
-          const models = await this.paseo.providers.listModels(p.id);
-          const model =
-            models.models.find(m => m.isDefault)?.id ?? models.models[0]?.id;
-          if (!model) continue;
-
-          // Prefer a mode with "ask" in its label (provider-agnostic heuristic
-          // for the most restricted available mode).
-          const modes = await this.paseo.providers.listModes(p.id);
-          const askMode = modes.modes.find(m =>
-            m.label.toLowerCase().includes("ask"),
-          );
-          const modeId = askMode?.id;
-
-          const selection = `${p.id}/${model}`;
-          this.fallbackProviderSelection = `${selection}|${modeId ?? ""}`;
-          return { providerSelection: selection, modeId };
-        } catch {
-          // This provider is unavailable or can't list models/modes — try next.
-        }
-      }
+      const { models } = await this.paseo.providers.listModels(providerId);
+      const model = models.find(model => model.isDefault)?.id ?? models[0]?.id;
+      if (!model) return null;
+      return { providerSelection: `${providerId}/${model}`, modeId };
     } catch {
-      // providers API unavailable — treat as no fallback
+      return null;
     }
+  }
 
-    this.fallbackProviderSelection = null;
-    return null;
+  private async readFallbackSetting(): Promise<string | undefined> {
+    try {
+      const state = await this.settings?.read();
+      return state?.status === "ready" && state.values?.fallbackProvider === "codex"
+        ? state.values.fallbackProvider : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async listLoadedSkillNames(agentId: string): Promise<string[]> {
@@ -569,93 +550,61 @@ export class PaseoAdapter {
     sourceAgent: SourceAgent,
     turnId: string,
     prompt: string,
+    reviewId?: string,
   ): Promise<CuratorRunResult> {
-    // Deterministic identity: one review of one turn always reuses the same
-    // key and title, so a retry reattaches instead of forking a second
-    // curator.
-    const idempotencyKey = `paseo-curator:${sourceAgent.id}:${turnId}`;
-    const agentId = deriveCuratorAgentId(sourceAgent.id, turnId);
-    const title = `Curator: ${sourceAgent.id} / ${turnId}`;
-    const labels = { "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId };
-    const metadata: Record<string, unknown> = {
-      "paseo.curator": true,
-      "paseo.sourceAgent": sourceAgent.id,
-      "paseo.turnId": turnId,
-    };
-
-    const unregisterCurator = registerCuratorAgentId(agentId);
-
-    // The client SDK requires `config.provider` in `provider/model` form (it
-    // splits on the first slash), while daemon snapshots carry the bare
-    // provider id and the model separately. Compose the selection: a provider
-    // that already includes a slash passes through; otherwise the snapshot's
-    // model is appended. With neither form available, try the discovered
-    // fallback before giving up.
-    let providerSelection = sourceAgent.provider.trim();
-    if (!providerSelection.includes("/")) {
-      const model = sourceAgent.model?.trim() ?? "";
-      if (model.length > 0) {
-        providerSelection = `${providerSelection}/${model}`;
-      } else {
-        // No model in snapshot — go straight to fallback if available.
-        const fallback = await this.discoverFallbackProvider();
-        if (fallback === null) {
-          unregisterCurator();
-          throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
-        }
-        providerSelection = fallback.providerSelection;
-      }
-    }
-
-    let handle: AgentHandle;
-    // modeId for the initial attempt: "ask" is known to work for omp. For
-    // other providers it may not exist; the fallback path uses the discovered
-    // mode.
-    let modeId: string | undefined = "ask";
+    const provider = sourceAgent.provider.trim();
+    const providerId = provider.split("/")[0];
+    const selection = provider.includes("/") ? provider
+      : sourceAgent.model?.trim() ? `${provider}/${sourceAgent.model.trim()}` : null;
+    const modeId = selection ? await this.restrictedMode(providerId) : null;
+    let route: CuratorRoute | null = selection && modeId ? { providerSelection: selection, modeId } : null;
     let usedFallback = false;
+    if (!route) {
+      route = await this.resolveFallbackProvider();
+      usedFallback = true;
+    }
+    if (!route) throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
 
-    const tryCreate = async (): Promise<AgentHandle> => {
-      return this.paseo.agents.create({
-        agentId,
-        config: { provider: providerSelection, modeId },
-        cwd: sourceAgent.cwd,
-        parent: sourceAgent.id,
-        prompt,
-        background: true,
-        idempotencyKey,
-        title,
-        labels,
-        metadata,
-      });
-    };
-
-    try {
-      handle = await tryCreate();
-      if (handle.id !== agentId) throw new Error("curator identity mismatch");
-    } catch {
-      // First attempt failed. Try the fallback provider if we haven't already.
-      if (!usedFallback) {
-        const fallback = await this.discoverFallbackProvider();
-        if (fallback !== null && fallback.providerSelection !== providerSelection) {
-          providerSelection = fallback.providerSelection;
-          modeId = fallback.modeId;
-          usedFallback = true;
-          try {
-            handle = await tryCreate();
-            if (handle.id !== agentId) throw new Error("curator identity mismatch");
-          } catch {
-            unregisterCurator();
-            throw curatorError(sourceAgent.id, turnId, "create-failed");
-          }
-        } else {
-          unregisterCurator();
-          throw curatorError(sourceAgent.id, turnId, "create-failed");
-        }
-      } else {
-        unregisterCurator();
+    const create = async (selected: CuratorRoute, fallback: boolean) => {
+      if (fallback && await this.readFallbackSetting() !== selected.providerSelection.split("/")[0]) {
+        throw curatorError(sourceAgent.id, turnId, "fallback-unavailable");
+      }
+      const routeKey = `${selected.providerSelection}:${selected.modeId}`;
+      const reviewKey = reviewId === undefined ? turnId : JSON.stringify([turnId, reviewId]);
+      const agentId = deriveCuratorAgentId(sourceAgent.id, `${reviewKey}:${routeKey}`);
+      const unregister = registerCuratorAgentId(agentId);
+      try {
+        const handle = await this.paseo.agents.create({
+          agentId,
+          config: { provider: selected.providerSelection, modeId: selected.modeId },
+          cwd: sourceAgent.cwd,
+          parent: sourceAgent.id,
+          prompt,
+          background: true,
+          idempotencyKey: `paseo-curator:${sourceAgent.id}:${reviewKey}:${routeKey}`,
+          title: `Curator: ${sourceAgent.id} / ${turnId}`,
+          labels: { "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
+          metadata: { "paseo.curator": true, "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
+        });
+        if (handle.id !== agentId) throw new Error("curator identity mismatch");
+        return { handle, unregister };
+      } catch {
+        unregister();
         throw curatorError(sourceAgent.id, turnId, "create-failed");
       }
+    };
+
+    let created: Awaited<ReturnType<typeof create>>;
+    try {
+      created = await create(route, usedFallback);
+    } catch {
+      const fallback = usedFallback ? null : await this.resolveFallbackProvider();
+      if (!fallback || fallback.providerSelection === route.providerSelection) {
+        throw curatorError(sourceAgent.id, turnId, "create-failed");
+      }
+      created = await create(fallback, true);
     }
+    const { handle, unregister: unregisterCurator } = created;
 
     let result: WaitForFinishResult;
     try {

@@ -39,7 +39,46 @@ afterEach(() => {
   for (const r of roots.splice(0, roots.length)) cleanupRoot(r);
 });
 
+function applyReviewed(mgr: SkillManager, ...args: Parameters<SkillManager["applyBatch"]>) {
+  return mgr.applyBatch(args[0], args[1], { ...args[2], reviewSnapshot: args[2].reviewSnapshot ?? mgr.captureReviewSnapshot() });
+}
+
 describe("SkillManager.applyBatch", () => {
+  it.each(["inside", "outside"] as const)("ignores an unrelated top-level symlink %s the root and refuses to mutate through it", async (location) => {
+    const root = newRoot("review-symlink");
+    const targetRoot = location === "inside" ? root : newRoot("review-symlink-target");
+    createSkill(root, "alpha", skillMd("alpha", "Original"));
+    createSkill(targetRoot, "target", skillMd("target", "Linked content"));
+    symlinkSync(join(targetRoot, "target"), join(root, "linked"), "dir");
+    const mgr = new SkillManager(root);
+    const reviewSnapshot = mgr.captureReviewSnapshot();
+    const applied = await mgr.applyBatch([makePatchOp("alpha", "Original", "Patched")], [], {
+      ...ctx, queueId: "q-real", reviewSnapshot,
+    });
+    expect(applied.outcome).toBe("applied");
+    expect(readSkillMd(root, "alpha")).toContain("Patched");
+    const rejected = await mgr.applyBatch([makePatchOp("linked", "Linked content", "Unexpected")], [], {
+      ...ctx, queueId: "q-linked", reviewSnapshot,
+    });
+    expect(rejected.outcome).toBe("rejected");
+    expect(readSkillMd(targetRoot, "target")).toContain("Linked content");
+  });
+
+  it.each(["patch", "remove_file"] as const)("preserves newer content when %s follows a concurrent change after review capture", async (type) => {
+    const root = newRoot("stale-review");
+    createSkill(root, "alpha", skillMd("alpha", "Original"), { "references/notes.md": "Original" });
+    const mgr = new SkillManager(root);
+    const reviewSnapshot = mgr.captureReviewSnapshot();
+    const file = join(root, "alpha", "references/notes.md");
+    writeFileSync(file, "Original plus a newer user edit");
+    const operation: SkillOperation = type === "patch"
+      ? { type, skillName: "alpha", path: "references/notes.md", oldText: "Original", newText: "Patched" }
+      : { type, skillName: "alpha", path: "references/notes.md" };
+    const result = await applyReviewed(mgr, [operation], [], { ...ctx, reviewSnapshot });
+    expect(result.outcome).toBe("rejected");
+    expect(readFileSync(file, "utf8")).toBe("Original plus a newer user edit");
+  });
+
   // -----------------------------------------------------------------------
   // create
   // -----------------------------------------------------------------------
@@ -47,7 +86,7 @@ describe("SkillManager.applyBatch", () => {
     it("creates a new skill with valid frontmatter", async () => {
       const root = newRoot("create-basic");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "create", skillName: "alpha", content: skillMd("alpha", "Do things.\n") }],
         [],
         ctx,
@@ -68,8 +107,8 @@ describe("SkillManager.applyBatch", () => {
       ];
       const context = { queueId: "q-receipt-1", sourceAgentId: "agent-1", turnId: "turn-1" };
 
-      const first = await mgr.applyBatch(operations, [], context);
-      const second = await mgr.applyBatch(operations, [], context);
+      const first = await applyReviewed(mgr, operations, [], context);
+      const second = await applyReviewed(mgr, operations, [], context);
 
       expect(first.outcome).toBe("applied");
       expect(second.outcome).toBe("applied");
@@ -86,8 +125,8 @@ describe("SkillManager.applyBatch", () => {
       const context = { queueId: "q-receipt-concurrent", sourceAgentId: "agent-1", turnId: "turn-1" };
 
       const [first, second] = await Promise.all([
-        mgr.applyBatch(operations, [], context),
-        mgr.applyBatch(operations, [], context),
+        applyReviewed(mgr, operations, [], context),
+        applyReviewed(mgr, operations, [], context),
       ]);
 
       expect(first.outcome).toBe("applied");
@@ -102,7 +141,7 @@ describe("SkillManager.applyBatch", () => {
         { type: "create" as const, skillName: "drift-skill", content: skillMd("drift-skill", "Original.\n") },
       ];
       const context = { queueId: "q-receipt-drift", sourceAgentId: "agent-1", turnId: "turn-1" };
-      expect((await mgr.applyBatch(operations, [], context)).outcome).toBe("applied");
+      expect((await applyReviewed(mgr, operations, [], context)).outcome).toBe("applied");
       writeFileSync(join(root, "drift-skill", "SKILL.md"), skillMd("drift-skill", "User changed.\n"));
 
       await expect(mgr.applyBatch(operations, [], context)).rejects.toThrow(/receipt.*drift/i);
@@ -116,7 +155,7 @@ describe("SkillManager.applyBatch", () => {
         { type: "create" as const, skillName: "reconciled-skill", content: skillMd("reconciled-skill", "Body.\n") },
       ];
       const context = { queueId: "q-intent-reconcile", sourceAgentId: "agent-1", turnId: "turn-1" };
-      expect((await mgr.applyBatch(operations, [], context)).outcome).toBe("applied");
+      expect((await applyReviewed(mgr, operations, [], context)).outcome).toBe("applied");
       rmSync(join(root, ".paseo-curator", "receipts", `${context.queueId}.json`));
 
       const result = await mgr.reconcileBatch(context);
@@ -138,7 +177,7 @@ describe("SkillManager.applyBatch", () => {
         { type: "create" as const, skillName: "mixed-two", content: skillMd("mixed-two", "Two.\n") },
       ];
       const context = { queueId: "q-intent-mixed", sourceAgentId: "agent-1", turnId: "turn-2" };
-      expect((await mgr.applyBatch(operations, [], context)).outcome).toBe("applied");
+      expect((await applyReviewed(mgr, operations, [], context)).outcome).toBe("applied");
       rmSync(join(root, ".paseo-curator", "receipts", `${context.queueId}.json`));
       rmSync(join(root, "mixed-two"), { recursive: true });
 
@@ -153,7 +192,7 @@ describe("SkillManager.applyBatch", () => {
       const root = newRoot("create-exists");
       const mgr = new SkillManager(root);
       createSkill(root, "beta", skillMd("beta", "Existing.\n"));
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "create", skillName: "beta", content: skillMd("beta", "New.\n") }],
         [],
         ctx,
@@ -165,7 +204,7 @@ describe("SkillManager.applyBatch", () => {
     it("rejects create when frontmatter name does not match skillName", async () => {
       const root = newRoot("create-name-mismatch");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "create", skillName: "gamma", content: skillMd("delta", "Body.\n") }],
         [],
         ctx,
@@ -177,7 +216,7 @@ describe("SkillManager.applyBatch", () => {
     it("rejects create when frontmatter is missing", async () => {
       const root = newRoot("create-no-frontmatter");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "create", skillName: "epsilon", content: "No frontmatter here.\n" }],
         [],
         ctx,
@@ -189,7 +228,7 @@ describe("SkillManager.applyBatch", () => {
     it("stamps curator provenance on create when created_by is missing", async () => {
       const root = newRoot("create-no-created-by");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "create", skillName: "zeta", content: "---\nname: zeta\n---\n\nBody.\n" }],
         [],
         ctx,
@@ -203,7 +242,7 @@ describe("SkillManager.applyBatch", () => {
     it("overrides a foreign created_by value on create with curator provenance", async () => {
       const root = newRoot("create-foreign-created-by");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [
           {
             type: "create",
@@ -224,7 +263,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       // Duplicate keys with a foreign value last: the parser is last-wins,
       // so without normalization the model would control effective provenance.
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [
           {
             type: "create",
@@ -246,7 +285,7 @@ describe("SkillManager.applyBatch", () => {
     it("rejects create with duplicate non-provenance frontmatter keys", async () => {
       const root = newRoot("create-duplicate-generic-key");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [
           {
             type: "create",
@@ -266,7 +305,7 @@ describe("SkillManager.applyBatch", () => {
       const root = newRoot("write-file-skill-md");
       const mgr = new SkillManager(root);
       createSkill(root, "wf", skillMd("wf", "Body.\n"));
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [
           {
             type: "write_file",
@@ -290,7 +329,7 @@ describe("SkillManager.applyBatch", () => {
       const root = newRoot("write-file-references");
       const mgr = new SkillManager(root);
       createSkill(root, "wfr", skillMd("wfr", "Body.\n"));
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [
           {
             type: "write_file",
@@ -317,7 +356,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "patch-skill", skillMd("patch-skill", body));
       const entry = readToEntry(root, "patch-skill", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("patch-skill", "Step two: do Y.", "Step two: do Z.")],
         [entry],
         ctx,
@@ -336,7 +375,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "legacy", content);
       const entry = readToEntry(root, "legacy", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("legacy", "Step one: do X.", "Step one: do X carefully.")],
         [entry],
         ctx,
@@ -354,7 +393,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "owned", skillMd("owned", "Body line.\n"));
       const entry = readToEntry(root, "owned", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [
           makePatchOp(
             "owned",
@@ -377,7 +416,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "pf", skillMd("pf", "Only A here.\n"));
       const entry = readToEntry(root, "pf", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("pf", "B does not exist", "C")],
         [entry],
         ctx,
@@ -392,7 +431,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "pa", skillMd("pa", "word word word\n"));
       const entry = readToEntry(root, "pa", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("pa", "word", "other")],
         [entry],
         ctx,
@@ -414,7 +453,7 @@ describe("SkillManager.applyBatch", () => {
       const skillDir = join(root, "ps");
       writeFileSync(join(skillDir, "SKILL.md"), "modified by another agent\n", "utf8");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("ps", "original content", "replaced")],
         [entry],
         ctx,
@@ -424,12 +463,12 @@ describe("SkillManager.applyBatch", () => {
       expect(readFileSync(join(skillDir, "SKILL.md"), "utf8")).toBe("modified by another agent\n");
     });
 
-    it("applies a patch with no model-supplied read-set evidence (the locked snapshot is authoritative)", async () => {
+    it("applies a patch with no model-supplied read-set evidence (the pre-review snapshot is authoritative)", async () => {
       const root = newRoot("patch-no-evidence");
       const mgr = new SkillManager(root);
       createSkill(root, "pe", skillMd("pe", "content\n"));
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("pe", "content", "other")],
         [],
         ctx,
@@ -446,7 +485,7 @@ describe("SkillManager.applyBatch", () => {
       });
       const entry = readToEntry(root, "psup", "references/guide.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "patch", skillName: "psup", path: "references/guide.md", oldText: "Guide v1", newText: "Guide v2" }],
         [entry],
         ctx,
@@ -465,7 +504,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       createSkill(root, "wf", skillMd("wf", "body\n"));
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeWriteFileOp("wf", "references/notes.md", "Some notes\n")],
         [],
         ctx,
@@ -482,7 +521,7 @@ describe("SkillManager.applyBatch", () => {
         "references/existing.md": "already here\n",
       });
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeWriteFileOp("wf2", "references/existing.md", "new content\n")],
         [],
         ctx,
@@ -494,7 +533,7 @@ describe("SkillManager.applyBatch", () => {
     it("rejects write_file for a non-existent skill", async () => {
       const root = newRoot("writefile-no-skill");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeWriteFileOp("no-skill", "references/x.md", "content\n")],
         [],
         ctx,
@@ -508,7 +547,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "wf3", skillMd("wf3", "body\n"));
 
       // SKILL.md is not a valid write_file target (only a patch target).
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "write_file", skillName: "wf3", path: "SKILL.md", content: "hijacked\n" }],
         [],
         ctx,
@@ -530,7 +569,7 @@ describe("SkillManager.applyBatch", () => {
       });
       const entry = readToEntry(root, "rf", "references/to-delete.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeRemoveFileOp("rf", "references/to-delete.md")],
         [entry],
         ctx,
@@ -548,7 +587,7 @@ describe("SkillManager.applyBatch", () => {
         "references/x.md": "x\n",
       });
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeRemoveFileOp("rf2", "references/x.md")],
         [],
         ctx,
@@ -562,7 +601,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       createSkill(root, "rf3", skillMd("rf3", "body\n"));
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeRemoveFileOp("rf3", "references/never-here.md")],
         [],
         ctx,
@@ -580,7 +619,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       createSkill(root, "archived-skill", skillMd("archived-skill", "body\n", { createdBy: "paseo-curator" }));
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeArchiveOp("archived-skill")],
         [],
         ctx,
@@ -596,7 +635,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "archived-skill", skillMd("archived-skill", "body\n", { createdBy: "paseo-curator" }));
       const operations = [makeArchiveOp("archived-skill")];
       const context = { queueId: "q-archive-drift", sourceAgentId: "agent-1", turnId: "turn-1" };
-      expect((await mgr.applyBatch(operations, [], context)).outcome).toBe("applied");
+      expect((await applyReviewed(mgr, operations, [], context)).outcome).toBe("applied");
       writeFileSync(join(root, ".archive", "archived-skill", "SKILL.md"), "corrupt\n");
 
       await expect(mgr.applyBatch(operations, [], context)).rejects.toThrow(/receipt.*drift/i);
@@ -607,7 +646,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       createSkill(root, "user-skill", skillMd("user-skill", "body\n", { createdBy: "user" }));
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeArchiveOp("user-skill")],
         [],
         ctx,
@@ -624,7 +663,7 @@ describe("SkillManager.applyBatch", () => {
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(join(skillDir, "SKILL.md"), "no frontmatter at all\n", "utf8");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeArchiveOp("mystery-skill")],
         [],
         ctx,
@@ -644,7 +683,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "trav", skillMd("trav", "body\n"));
       const entry = readToEntry(root, "trav", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "patch", skillName: "trav", path: "../evil.md", oldText: "x", newText: "y" }],
         [entry],
         ctx,
@@ -657,7 +696,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       createSkill(root, "abs", skillMd("abs", "body\n"));
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "write_file", skillName: "abs", path: "/etc/passwd", content: "evil\n" }],
         [],
         ctx,
@@ -681,7 +720,7 @@ describe("SkillManager.applyBatch", () => {
       const targetFile = join(refsDir, "leak.md");
       symlinkSync(outsideFile, targetFile, "file");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "patch", skillName: "slink", path: "references/leak.md", oldText: "top secret", newText: "hacked" }],
         [],
         ctx,
@@ -704,7 +743,7 @@ describe("SkillManager.applyBatch", () => {
       const ops = makeCreateOps(names, root);
       expect(ops.length).toBe(20);
 
-      const result = await mgr.applyBatch(ops, [], ctx);
+      const result = await applyReviewed(mgr, ops, [], ctx);
       expect(result.outcome).toBe("applied");
       expect(listSkills(root)).toHaveLength(20);
     });
@@ -715,7 +754,7 @@ describe("SkillManager.applyBatch", () => {
       const names = Array.from({ length: 21 }, (_, i) => `skill-${i}`);
       const ops = makeCreateOps(names, root);
 
-      const result = await mgr.applyBatch(ops, [], ctx);
+      const result = await applyReviewed(mgr, ops, [], ctx);
       expect(result.outcome).toBe("rejected");
       expect(listSkills(root)).toHaveLength(0);
     });
@@ -723,7 +762,7 @@ describe("SkillManager.applyBatch", () => {
     it("rejects an empty batch", async () => {
       const root = newRoot("opcount-0");
       const mgr = new SkillManager(root);
-      const result = await mgr.applyBatch([], [], ctx);
+      const result = await applyReviewed(mgr, [], [], ctx);
       expect(result.outcome).toBe("rejected");
     });
   });
@@ -739,7 +778,7 @@ describe("SkillManager.applyBatch", () => {
       createSkill(root, "audit-skill", skillMd("audit-skill", body));
       const entry = readToEntry(root, "audit-skill", "SKILL.md");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("audit-skill", "line two", "line three")],
         [entry],
         ctx,
@@ -764,7 +803,7 @@ describe("SkillManager.applyBatch", () => {
       const mgr = new SkillManager(root);
       const content = skillMd("hash-skill", "content\n");
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "create", skillName: "hash-skill", content }],
         [],
         ctx,
@@ -810,7 +849,7 @@ describe("SkillManager.applyBatch", () => {
         makePatchOp("beta", "beta body", "beta patched"),
       ];
 
-      const result = await mgr.applyBatch(ops, [alphaEntry, betaEntry], ctx);
+      const result = await applyReviewed(mgr, ops, [alphaEntry, betaEntry], ctx);
       expect(result.outcome).toBe("rolled_back");
       expect(result.outcomes[2].status).toBe("failed");
 
@@ -849,7 +888,7 @@ describe("SkillManager.applyBatch", () => {
       const existingEntry = readToEntry(root, "existing", "SKILL.md");
       ops[1] = makePatchOp("existing", "original body", "patched body");
 
-      const result = await mgr.applyBatch(ops, [existingEntry], ctx);
+      const result = await applyReviewed(mgr, ops, [existingEntry], ctx);
       expect(result.outcome).toBe("rolled_back");
 
       // The newly created skill must be gone.
@@ -873,7 +912,7 @@ describe("SkillManager.applyBatch", () => {
         { type: "create" as const, skillName: "claim-two", content: skillMd("claim-two", "Two.\n") },
       ];
 
-      const result = await mgr.applyBatch(operations, [], context);
+      const result = await applyReviewed(mgr, operations, [], context);
 
       expect(result.outcome).toBe("rolled_back");
       expect(skillDirExists(root, "claim-one")).toBe(false);
@@ -900,7 +939,7 @@ describe("SkillManager.applyBatch", () => {
         { type: "create" as const, skillName: "alpha", content: skillMd("alpha", "conflict\n") },
       ];
 
-      const result = await mgr.applyBatch(ops, [alphaEntry], ctx);
+      const result = await applyReviewed(mgr, ops, [alphaEntry], ctx);
       expect(result.outcome).toBe("rejected");
       // No mutation must have occurred.
       expect(readSkillMd(root, "alpha")).toBe(originalAlpha);
@@ -920,7 +959,7 @@ describe("SkillManager.applyBatch", () => {
         makePatchOp("dup-skill", "body", "patched"),
       ];
 
-      const result = await mgr.applyBatch(ops, [entry], ctx);
+      const result = await applyReviewed(mgr, ops, [entry], ctx);
       expect(result.outcome).toBe("rejected");
       // The original content must be unchanged.
       expect(readSkillMd(root, "dup-skill")).toBe(skillMd("dup-skill", "body\n"));
@@ -948,7 +987,7 @@ describe("SkillManager.applyBatch", () => {
         makeWriteFileOp("alpha", "references/added.md", "added\n"),
       ];
 
-      const result = await mgr.applyBatch(ops, [aEntry, bEntry], ctx);
+      const result = await applyReviewed(mgr, ops, [aEntry, bEntry], ctx);
       expect(result.outcome).toBe("applied");
       expect(result.outcomes.every((o) => o.status === "applied")).toBe(true);
 
@@ -989,7 +1028,7 @@ describe("SkillManager.applyBatch", () => {
         makeWriteFileOp("existing", "references/new.md", "new file\n"),
       ];
 
-      const result = await mgr.applyBatch(ops, [entry], ctx);
+      const result = await applyReviewed(mgr, ops, [entry], ctx);
 
       // Must NOT be a clean rollback.
       expect(result.outcome).not.toBe("rolled_back");
@@ -1037,7 +1076,7 @@ describe("SkillManager.applyBatch", () => {
         makeWriteFileOp("swap-skill", "references/evil.md", "evil\n"),
       ];
 
-      const result = await mgr.applyBatch(ops, [entry], ctx);
+      const result = await applyReviewed(mgr, ops, [entry], ctx);
 
       // The batch must not have applied cleanly.
       expect(result.outcome).not.toBe("applied");
@@ -1102,7 +1141,7 @@ describe("SkillManager.applyBatch", () => {
         makeWriteFileOp("rootswap-skill", "references/new.md", "new file\n"),
       ];
 
-      const result = await mgr.applyBatch(ops, [entry], ctx);
+      const result = await applyReviewed(mgr, ops, [entry], ctx);
 
       // Every outside sentinel must remain byte-for-byte unchanged.
       expect(readFileSync(outsideFile1, "utf8")).toBe(content1);
@@ -1150,7 +1189,7 @@ describe("SkillManager.applyBatch", () => {
         hash: sha256(full), // index hash of the whole file
       };
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [{ type: "patch", skillName: "long-skill", path: "SKILL.md", oldText: "line two", newText: "line two, verified" }],
         [entry],
         ctx,
@@ -1181,7 +1220,7 @@ describe("SkillManager.applyBatch", () => {
         hash: sha256(originalContent), // hash matches disk, but content does not
       };
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makePatchOp("ev-skill", "line two", "line three")],
         [entry],
         ctx,
@@ -1209,7 +1248,7 @@ describe("SkillManager.applyBatch", () => {
         hash: sha256(fileContent), // hash matches disk
       };
 
-      const result = await mgr.applyBatch(
+      const result = await applyReviewed(mgr,
         [makeRemoveFileOp("ev2-skill", "references/todelete.md")],
         [entry],
         ctx,

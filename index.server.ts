@@ -29,10 +29,11 @@ import type {
   PluginLifecycleEvents,
   PluginServerContext,
 } from "@getpaseo/plugin/server";
+import { curatorSettings } from "./shared/settings";
 
 
 import { CuratorOrchestrator, type SkillSummary } from "./server/orchestrator";
-import { PaseoAdapter, type PaseoApiRef, type SourceAgent } from "./server/paseo-adapter";
+import { PaseoAdapter, type PaseoApiRef, type SourceAgent, type RoutingSettings } from "./server/paseo-adapter";
 import { CuratorStore } from "./server/store";
 import { SkillManager } from "./server/skill-manager";
 import { parseFrontmatter } from "./server/skill-files";
@@ -415,12 +416,12 @@ function safeLstat(path: string) {
 export function createProductionRuntime(
   paseo: PaseoApi,
   config: PluginConfig = DEFAULT_PLUGIN_CONFIG,
-  options: { stateDir?: string } = {},
+  options: { stateDir?: string; settings?: RoutingSettings } = {},
 ): CuratorRuntime {
   const skillRoot = expandHome(config.skillRoot);
   // `PaseoApiRef` mirrors the real `PaseoApi` for exactly the surface the
   // adapter consumes; cast through `unknown` (type-only SDK import, no `any`).
-  const adapter = new PaseoAdapter(paseo as unknown as PaseoApiRef);
+  const adapter = new PaseoAdapter(paseo as unknown as PaseoApiRef, options.settings);
 
   const stateDir = options.stateDir ?? expandHome(STATE_DIR);
   mkdirSync(stateDir, { recursive: true });
@@ -479,6 +480,7 @@ export function createProductionRuntime(
         [],
         {
           queueId,
+          reviewSnapshot: skillManager.captureReviewSnapshot(),
           sourceAgentId: "paseo-curator-maintenance",
           turnId: skillName,
         },
@@ -586,11 +588,12 @@ export function createProductionRuntime(
 }
 
 export default function contribute(server: PluginServerContext): () => Promise<void> {
+  const settings = server.registerSettings(curatorSettings);
   const removePermissionGuard = server.on(
     "agent.permission_requested",
     handleCuratorPermissionRequested,
   );
-  const cleanupRuntime = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo));
+  const cleanupRuntime = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo, DEFAULT_PLUGIN_CONFIG, { settings }));
   return async () => {
     try {
       await cleanupRuntime();

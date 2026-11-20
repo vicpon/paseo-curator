@@ -28,14 +28,7 @@ import {
 // Read set
 // ===========================================================================
 
-/**
- * A read-set entry: the exact content the curator agent read for a given file
- * at review time. Used as read-before-write evidence.
- *
- * `hash` is the SHA-256 of `content` at the time the agent read it. The
- * manager re-validates this hash against the locked snapshot before applying
- * any write to that file.
- */
+/** Legacy model evidence, retained for callers but never used as a freshness proof. */
 export interface ReadSetEntry {
   skillName: string;
   path: string;
@@ -134,7 +127,8 @@ export interface SkillManagerOptions {
 }
 
 type BatchContext = { queueId: string; sourceAgentId: string; turnId: string };
-type BatchApplyContext = BatchContext & { claimIsCurrent?: () => boolean };
+export type ReviewSnapshot = object;
+type BatchApplyContext = BatchContext & { claimIsCurrent?: () => boolean; reviewSnapshot?: ReviewSnapshot };
 export type BatchReconciliation =
   | { outcome: "none" }
   | { outcome: "applied"; operationsHash: string; operationCount: number; skillNames: string[] }
@@ -150,20 +144,19 @@ export type BatchReconciliation =
  * Protocol for {@link applyBatch}:
  *
  * 1. **Validate** the whole batch (op count, skill names, path containment,
- *    frontmatter, provenance, read-set evidence) against the *current*
+ *    frontmatter and provenance) against the *current*
  *    filesystem state. Any failure rejects the batch with no mutation.
  *
  * 2. **Lock**: acquire per-skill locks in stable (lexicographic) order. This
  *    serializes concurrent batches touching the same skills and prevents
  *    deadlock.
  *
- * 3. **Snapshot**: with all locks held, snapshot every touched skill. Because
- *    the locks are held, no concurrent process can modify these skills
- *    between the snapshot and the apply, resolving the TOCTOU window.
+ * 3. **Snapshot**: with all locks held, snapshot every touched skill. Locks
+ *    serialize cooperating plugin batches, not arbitrary external editors.
  *
  * 4. **Re-validate against the snapshot**: the logical batch is validated
  *    against the *snapshot* (the locked state), not a second unconstrained
- *    read. Read-set evidence hashes are checked against the snapshot hashes.
+ *    read. Compare these versions with the plugin-owned pre-review capture.
  *
  * 5. **Apply**: execute each operation against the snapshot-derived virtual
  *    state. Writes use temp-file + atomic rename. Before every file
@@ -181,6 +174,7 @@ export type BatchReconciliation =
  *    the locks are released and the batch is committed.
  */
 export class SkillManager {
+  private readonly reviewSnapshots = new WeakMap<ReviewSnapshot, Map<string, string>>();
   private readonly skillRoot: string;
   private readonly faultInjector?: FaultInjector;
   private readonly restoreSkillImpl: RestoreSkillFn;
@@ -202,19 +196,52 @@ export class SkillManager {
     return this.skillRoot;
   }
 
+  captureReviewSnapshot(): ReviewSnapshot {
+    const versions = new Map<string, string>();
+    for (const entry of readdirSync(this.skillRoot, { withFileTypes: true })) {
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(entry.name)) continue;
+      if (!entry.isDirectory()) continue;
+      verifyContained(this.skillRoot, join(this.skillRoot, entry.name));
+      versions.set(entry.name, this.snapshotVersion(snapshotSkill(this.skillRoot, entry.name)));
+    }
+    const token = Object.freeze({});
+    this.reviewSnapshots.set(token, versions);
+    return token;
+  }
+
+  private validateReviewVersions(token: ReviewSnapshot | undefined, snapshots: Map<string, SkillSnapshot>): string | null {
+    const versions = token && this.reviewSnapshots.get(token);
+    if (!versions) return "missing pre-review snapshot";
+    for (const [name, snapshot] of snapshots) {
+      const expected = versions.get(name);
+      if (expected === undefined ? snapshot.existed : expected !== this.snapshotVersion(snapshot)) {
+        return `skill changed since review capture: ${name}`;
+      }
+    }
+    return null;
+  }
+
+  private snapshotVersion(snapshot: SkillSnapshot): string {
+    return sha256(JSON.stringify({
+      existed: snapshot.existed,
+      hashes: [...snapshot.hashes].sort(([a], [b]) => a.localeCompare(b)),
+      symlinks: [...snapshot.symlinks].sort(([a], [b]) => a.localeCompare(b)),
+    }));
+  }
+
   /**
    * Apply a batch of operations atomically. See the class doc for the full
    * protocol.
    */
   async applyBatch(
     operations: SkillOperation[],
-    readSet: ReadSetEntry[],
+    _readSet: ReadSetEntry[],
     context: BatchApplyContext,
   ): Promise<BatchApplyResult> {
     this.createdTempFiles.clear();
 
     // -- Phase 1: validate the whole batch (no mutation) --
-    const rejected = this.preflight(operations, readSet);
+    const rejected = this.preflight(operations);
 
     const skillNames = [...new Set(operations.map((op) => op.skillName))];
     const lockNames = [this.queueLockName(context.queueId), ...skillNames];
@@ -278,7 +305,8 @@ export class SkillManager {
 
       // -- Phase 4: re-validate the logical batch against the locked
       //    snapshots (TOCTOU resolution) --
-      const snapshotRejection = this.validateAgainstSnapshots(operations, readSet, snapshots);
+      const snapshotRejection = this.validateReviewVersions(context.reviewSnapshot, snapshots)
+        ?? this.validateAgainstSnapshots(operations, snapshots);
       if (snapshotRejection) {
         return {
           outcome: "rejected",
@@ -691,15 +719,13 @@ export class SkillManager {
    * *before* locks are acquired. The authoritative validation happens in
    * {@link validateAgainstSnapshots} after the locks are held.
    */
-  private preflight(operations: SkillOperation[], readSet: ReadSetEntry[]): string | null {
+  private preflight(operations: SkillOperation[]): string | null {
     if (operations.length > 20) {
       return `batch exceeds the 20-operation limit (got ${operations.length})`;
     }
     if (operations.length === 0) {
       return "batch is empty";
     }
-
-    const readSetMap = buildReadSetMap(readSet);
 
     for (const op of operations) {
       // Skill name.
@@ -763,21 +789,11 @@ export class SkillManager {
     return null;
   }
 
-  /**
-   * Validate the batch against the locked snapshots (TOCTOU-safe).
-   *
-   * Every existence/uniqueness/staleness check is performed against the
-   * snapshot data, not the live filesystem. This is the authoritative
-   * validation: if the filesystem changed between the curator agent's read
-   * and now, the snapshot hash will not match the read-set evidence hash and
-   * the batch is rejected.
-   */
+  /** Validate sequential operation semantics after the pre-review version check. */
   private validateAgainstSnapshots(
     operations: SkillOperation[],
-    readSet: ReadSetEntry[],
     snapshots: Map<string, SkillSnapshot>,
   ): string | null {
-    const readSetMap = buildReadSetMap(readSet);
 
     // Build a virtual view of the skills as they will be after this batch,
     // starting from the snapshots.
@@ -884,10 +900,6 @@ export class SkillManager {
     if (current === null || current === undefined) {
       return `patch: file does not exist: ${op.skillName}/${op.path}`;
     }
-
-    // `current` is the content captured under the skill lock, so it is the
-    // authoritative read-before-write snapshot; no model-supplied digest is
-    // trusted here.
 
     // The patch must match uniquely.
     const occurrences = countOccurrences(current, op.oldText);
@@ -1328,13 +1340,7 @@ export class SkillManager {
 // Helpers
 // ===========================================================================
 
-function buildReadSetMap(readSet: ReadSetEntry[]): Map<string, ReadSetEntry> {
-  const map = new Map<string, ReadSetEntry>();
-  for (const entry of readSet) {
-    map.set(`${entry.skillName}/${entry.path}`, entry);
-  }
-  return map;
-}
+
 
 function splitFileKey(key: string): [string, string] {
   const idx = key.indexOf("/");

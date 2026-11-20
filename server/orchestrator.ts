@@ -10,6 +10,7 @@ import { buildReviewPrompt } from "./review-prompt";
 import { parseReviewResult, type ReadSetEntry } from "./review-parser";
 import type { QueueRecord, SkillOperation } from "./contracts";
 import type { AuditInput } from "./store";
+import type { ReviewSnapshot } from "./skill-manager";
 
 // ---------------------------------------------------------------------------
 // Structural dependency interfaces
@@ -26,8 +27,8 @@ interface QueueStoreLike {
     createdBy: string,
     activity: "create" | "patch" | "view" | "use",
   ): void;
-  recordAudit(input: AuditInput): void;
-  complete(id: string, outcome: "applied" | "nothing_to_save", claimAttempt: number): boolean;
+  recordAuditIfClaimCurrent(id: string, claimAttempt: number, input: AuditInput): boolean;
+  completeWithAudit(id: string, outcome: "applied" | "nothing_to_save", claimAttempt: number, input: AuditInput): boolean;
   fail(id: string, safeError: string, claimAttempt: number): boolean;
   /**
    * Terminalize a failed review attempt: re-queues (`pending`) while the row's
@@ -55,7 +56,7 @@ interface QueueStoreLike {
 /** The bounded timeline/curator adapter surface the orchestrator consumes. */
 interface AdapterLike {
   readWholeTurn(agent: SourceAgent, turnId: string): Promise<WholeTurnRead>;
-  runCurator(agent: SourceAgent, turnId: string, prompt: string): Promise<{
+  runCurator(agent: SourceAgent, turnId: string, prompt: string, reviewId?: string): Promise<{
     curatorAgentId: string;
     finalText: string;
   }>;
@@ -63,6 +64,7 @@ interface AdapterLike {
 
 /** The guarded skill-manager surface the orchestrator consumes. */
 interface SkillManagerLike {
+  captureReviewSnapshot(): ReviewSnapshot;
   reconcileBatch(
     context: { queueId: string; sourceAgentId: string; turnId: string },
   ): Promise<
@@ -78,6 +80,7 @@ interface SkillManagerLike {
       sourceAgentId: string;
       turnId: string;
       claimIsCurrent?: () => boolean;
+      reviewSnapshot?: ReviewSnapshot;
     },
   ): Promise<
     { outcome: "applied" | "rejected" | "rolled_back" | "rollback_failed" }
@@ -354,7 +357,7 @@ export class CuratorOrchestrator {
       };
       const reconciliation = await this.skillManager.reconcileBatch(context);
       if (reconciliation.outcome === "applied") {
-        this.store.recordAudit({
+        const completed = this.store.completeWithAudit(row.id, "applied", row.attempts, {
           ...context,
           outcome: "applied",
           summary: "reconciled applied batch",
@@ -362,7 +365,6 @@ export class CuratorOrchestrator {
           operationsHash: reconciliation.operationsHash,
           skillNames: reconciliation.skillNames,
         });
-        const completed = this.store.complete(row.id, "applied", row.attempts);
         if (completed) {
           await this.notifyBestEffort({
             outcome: "applied",
@@ -375,7 +377,7 @@ export class CuratorOrchestrator {
         return "failed";
       }
       if (reconciliation.outcome === "reconciliation_required") {
-        this.store.recordAudit({
+        this.store.recordAuditIfClaimCurrent(row.id, row.attempts, {
           ...context,
           outcome: "rejected",
           summary: "filesystem reconciliation required",
@@ -410,6 +412,7 @@ export class CuratorOrchestrator {
       };
 
       // Build the review prompt from the exact turn and the current library.
+      const reviewSnapshot = this.skillManager.captureReviewSnapshot();
       const skills = await this.listSkills();
       const prompt = buildReviewPrompt({
         sourceAgentId: row.sourceAgentId,
@@ -419,7 +422,7 @@ export class CuratorOrchestrator {
       }).prompt;
 
       // Run the curator and parse its strict, content-validated result.
-      const result = await this.adapter.runCurator(rereadAgent, row.turnId, prompt);
+      const result = await this.adapter.runCurator(rereadAgent, row.turnId, prompt, `${row.id}:${row.attempts}`);
       const parsed = parseReviewResult(result.finalText);
 
       if (parsed === null) {
@@ -434,7 +437,7 @@ export class CuratorOrchestrator {
         if (parsed.operations.length !== 0) {
           return this.retryOrFailAndNotify(row, "invalid curator output");
         }
-        this.store.recordAudit({
+        this.store.completeWithAudit(row.id, "nothing_to_save", row.attempts, {
           ...context,
           outcome: "nothing_to_save",
           summary: "nothing to save",
@@ -442,7 +445,6 @@ export class CuratorOrchestrator {
           operationsHash: hashOperations([]),
           skillNames: [],
         });
-        this.store.complete(row.id, "nothing_to_save", row.attempts);
         return "failed";
       }
 
@@ -454,11 +456,12 @@ export class CuratorOrchestrator {
         parsed.readSet,
         {
           ...context,
+          reviewSnapshot,
           claimIsCurrent: () => this.store.isClaimCurrent(row.id, row.attempts),
         },
       );
       const applied = applyResult.outcome === "applied";
-      this.store.recordAudit({
+      const audit: AuditInput = {
         ...context,
         outcome: applied ? "applied" : "rejected",
         summary: applied ? "batch applied" : "batch rejected",
@@ -472,16 +475,16 @@ export class CuratorOrchestrator {
                 applyResult.rejectionReason ? `: ${applyResult.rejectionReason}` : ""
               }`.slice(0, 300),
             }),
-      });
+      };
 
       if (applyResult.outcome === "applied") {
-        for (const operation of parsed.operations) {
-          const activity = operation.type === "create" ? "create" : "patch";
-          const createdBy = operation.type === "create" ? "paseo-curator" : "unknown";
-          this.store.recordSkillActivity(operation.skillName, createdBy, activity);
-        }
-        const completed = this.store.complete(row.id, "applied", row.attempts);
+        const completed = this.store.completeWithAudit(row.id, "applied", row.attempts, audit);
         if (completed) {
+          for (const operation of parsed.operations) {
+            const activity = operation.type === "create" ? "create" : "patch";
+            const createdBy = operation.type === "create" ? "paseo-curator" : "unknown";
+            this.store.recordSkillActivity(operation.skillName, createdBy, activity);
+          }
           await this.notifyBestEffort({
             outcome: "applied",
             sourceAgentId: row.sourceAgentId,
@@ -491,6 +494,7 @@ export class CuratorOrchestrator {
           });
         }
       } else if (applyResult.outcome === "rollback_failed") {
+        this.store.recordAuditIfClaimCurrent(row.id, row.attempts, audit);
         const failed = this.store.fail(
           row.id,
           "rollback failed; reconciliation required",
@@ -504,6 +508,7 @@ export class CuratorOrchestrator {
           });
         }
       } else {
+        this.store.recordAuditIfClaimCurrent(row.id, row.attempts, audit);
         // Carry the manager's structured, secret-safe reason into the queue
         // row so failures are diagnosable without forensic reproduction.
         await this.retryOrFailAndNotify(
