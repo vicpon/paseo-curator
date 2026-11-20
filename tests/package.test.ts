@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -80,23 +81,23 @@ describe("production runtime dependencies", () => {
   }
 
   function extractSpecifiers(source: string): string[] {
-    // Strip template literal bodies so that the word "from" inside a
-    // template string is never mistaken for an import clause.
-    const stripped = source.replace(/`[^`]*`/g, "``");
-    const specs: string[] = [];
-    // import ... from "x"  |  export ... from "x"  |  import "x"
-    for (const m of stripped.matchAll(/\b(?:import|export)\s+[\s\S]*?\bfrom\s+["']([^"']+)["']/g)) {
-      specs.push(m[1]);
-    }
-    // import "x"  (side-effect import)
-    for (const m of source.matchAll(/^\s*import\s+["']([^"']+)["']/gm)) {
-      specs.push(m[1]);
-    }
-    // require("x") / require('x')
-    for (const m of source.matchAll(/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g)) {
-      specs.push(m[1]);
-    }
-    return [...new Set(specs)];
+    const specs = new Set<string>();
+    const visit = (node: ts.Node): void => {
+      let specifier: ts.Expression | undefined;
+      if (ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly) {
+        specifier = node.moduleSpecifier;
+      } else if (ts.isExportDeclaration(node) && !node.isTypeOnly) {
+        specifier = node.moduleSpecifier;
+      } else if (ts.isImportEqualsDeclaration(node) && !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference)) {
+        specifier = node.moduleReference.expression;
+      } else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
+        specifier = node.arguments[0];
+      }
+      if (specifier && ts.isStringLiteral(specifier)) specs.add(specifier.text);
+      ts.forEachChild(node, visit);
+    };
+    visit(ts.createSourceFile("module.ts", source, ts.ScriptTarget.Latest));
+    return [...specs];
   }
 
   function packageOf(spec: string): string | null {
@@ -109,6 +110,16 @@ describe("production runtime dependencies", () => {
     }
     return spec.split("/")[0];
   }
+
+  it("excludes type-only declarations and retains runtime imports", () => {
+    expect(extractSpecifiers(`
+      import type { Client } from "type-only-client";
+      export /* comment */ type { Result } from "type-only-result";
+      import { create, type Options } from "runtime-client";
+      import "side-effect";
+      require("commonjs");
+    `)).toEqual(["runtime-client", "side-effect", "commonjs"]);
+  });
 
   it("declares every direct production runtime dependency under `dependencies`", () => {
     const shipped = collectShippedFiles();

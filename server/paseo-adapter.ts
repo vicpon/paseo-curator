@@ -280,7 +280,7 @@ export class PaseoAdapter {
   private async providerEnabled(provider: string): Promise<boolean> {
     try {
       const snapshot = await this.paseo.providers?.waitForReady({ timeoutMs: 10_000 });
-      return snapshot?.entries.some(entry => entry.provider === provider && entry.enabled && entry.status === "available") ?? false;
+      return snapshot?.entries.some(entry => entry.provider === provider && entry.enabled && entry.status === "ready") ?? false;
     } catch { return false; }
   }
 

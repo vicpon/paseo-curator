@@ -1,16 +1,8 @@
+import type { PaseoProviderActions } from "@getpaseo/client";
+
 /** Provider discovery is host-owned; only native confinement policies belong here. */
-export interface RoutingProviders {
-  waitForReady(options?: { timeoutMs?: number }): Promise<{
-    entries: ReadonlyArray<{ provider: string; label?: string; status: string; enabled: boolean }>;
-  }>;
-  listModels(provider: string): Promise<{
-    models?: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }>;
-    error?: string | null;
-  }>;
-  listControls?: (draft: {
-    provider: string; cwd: string; providerOptions: Record<string, unknown>;
-  }) => Promise<{ options?: Record<string, unknown>; error?: string | null }>;
-}
+export type RoutingProviders = Pick<PaseoProviderActions, "waitForReady" | "listModels">
+  & Partial<Pick<PaseoProviderActions, "listControls">>;
 
 export interface ReadOnlyConfig {
   provider: string;
@@ -53,7 +45,7 @@ export async function discoverRoutingProviders(api: RoutingProviders): Promise<R
   const { entries } = await api.waitForReady({ timeoutMs: 10_000 });
   return Promise.all([...entries].sort((a, b) => a.provider.localeCompare(b.provider)).map(async entry => {
     const reason = !entry.enabled ? "Disabled in host settings."
-      : entry.status !== "available" ? "Unavailable on this host."
+      : entry.status !== "ready" ? "Unavailable on this host."
       : confinementStatus(entry.provider);
     if (reason) return { id: entry.provider, label: entry.label ?? entry.provider, supported: false, reason, models: [] };
     try {

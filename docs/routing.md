@@ -6,6 +6,32 @@ order nor a preferred provider chooses a route. Native confinement has small pro
 adapters. Unknown families remain visible and unavailable until their controls are verified.
 No mode label is evidence of safety.
 
+## Live discovery correction (PR7)
+
+On 2026-11-20, an authenticated SDK connection to the existing desktop-managed Paseo
+0.17.0-beta.1 daemon returned `status: "ready"` for Claude, Codex, OMP, OpenCode,
+Hermes and GLM. The shipped CLI's `provider/ls.js` projects `"ready"` to `"available"`;
+that display value is not the SDK contract. Both settings discovery and the adapter's
+pre-create availability check must require `enabled && status === "ready"`.
+
+`RoutingProviders` now picks methods from the pinned SDK's `PaseoProviderActions`,
+including the actual snapshot, model and control result types. The client is an explicit
+build-time dependency; its type-only import adds no runtime module load. Regression
+fixtures in `tests/routing-fixtures.ts` project the authenticated snapshot's catalog fields
+and preserve real control response envelopes. Optional large model/icon/compact payloads
+are omitted. The discovery regression returned zero supported providers before the fix;
+11 adapter tests also failed when their fixtures were corrected to `"ready"`.
+
+Authenticated `listControls` calls verified the SDK input is
+`{provider: "family/model", cwd, providerOptions}` and the result carries effective
+`options`, `provider`, `controls`, `error`, `fetchedAt` and `requestId`. Claude retained
+`extraArgs.tools`, `allowedTools` and `disallowedTools`; Codex retained `sandbox_mode`
+and `approval_policy`. The existing request/response handling is correct. Model discovery
+and control resolution do not launch a review or establish live write-confinement proof.
+Unsupported families still fail closed with their safety reason, and fallback consent is
+still explicit. Native screenshot and exact deployed-revision evidence are recorded on PR7
+following tests, branch push, and an authorized curator-only reload; no daemon restart is needed.
+
 ## Routing contract
 
 1. Keep the exact source provider/model (including nested model IDs) if it is enabled,
@@ -23,7 +49,7 @@ No mode label is evidence of safety.
 5. Route and policy participate in reviewer identity, alongside the source turn and review
    attempt. Plugin-owned pre-review snapshots and apply-time claim/version fencing are unchanged.
 
-## Acceptance matrix
+## Original acceptance matrix (before live discovery correction)
 
 Observed host: desktop-managed Paseo 0.16.2, standard `paseo provider ls --json`, 2026-11-20.
 The installed SDK is `@getpaseo/client`/`plugin`/`protocol` 0.16.0-beta.2. No daemon was started,
@@ -100,8 +126,8 @@ Genuine browser screenshots were captured and inspected at 1280px and 375px widt
 HTML host-control substitutes and clearly labeled catalog/model fixtures. Selection survived
 provider refresh and browser reload; 375px document width equaled its viewport width.
 [Desktop](screenshots/routing-harness-desktop.png) and [compact](screenshots/routing-harness-mobile.png) captures retain the fixture notice.
-This verifies the browser harness only. Native Paseo UI, host settings persistence across
-plugin reloads, and end-to-end provider confinement remain untested: `orca-ide` is absent,
+This historical verification covered the browser harness only. Native Paseo UI, host settings persistence across
+plugin reloads, and end-to-end provider confinement were untested in that pass: `orca-ide` is absent,
 Paseo exposes no CDP port, and the user prohibited plugin reload/deployment. No native UI
 screenshot is claimed. Run `npm run preview:settings` to reproduce the testable artifact.
 

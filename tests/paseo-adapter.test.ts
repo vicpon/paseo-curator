@@ -1,3 +1,4 @@
+import { routingSnapshot, routingModels, routingControls } from "./routing-fixtures";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
@@ -810,9 +811,9 @@ function makeFakeCreate(
   const waitCalls: number[] = [];
   const paseo: FakePaseoApi = {
     providers: {
-      listControls: async (draft) => ({ options: draft.providerOptions }),
-      waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }, { provider: "claude", status: "available", enabled: true }] }),
-      listModels: async () => ({ models: [] }),
+      listControls: routingControls,
+      waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }, { provider: "claude", status: "ready", enabled: true }]),
+      listModels: async (provider) => routingModels(provider, []),
     },
     agents: {
       ref: (id: string) => {
@@ -1036,9 +1037,9 @@ describe("runCurator", () => {
         },
       },
       providers: {
-        listControls: async (draft) => ({ options: draft.providerOptions }),
-      waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }, { provider: "claude", status: "available", enabled: true }] }),
-        listModels: async () => ({ models: [{ id: "codex-default", label: "Default", isDefault: true }] }),
+        listControls: routingControls,
+      waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }, { provider: "claude", status: "ready", enabled: true }]),
+        listModels: async (provider) => routingModels(provider, [{ id: "codex-default", label: "Default", isDefault: true }]),
       },
     };
     const settings = {
@@ -1079,9 +1080,9 @@ describe("runCurator", () => {
   it("reads routing settings fresh after switching, clearing, invalidation and recovery", async () => {
     const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
     paseo.providers = {
-      listControls: async (draft) => ({ options: draft.providerOptions }),
-      waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }, { provider: "claude", status: "available", enabled: true }] }),
-      listModels: async () => ({ models: [{ id: "default", label: "Default", isDefault: true }] }),
+      listControls: routingControls,
+      waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }, { provider: "claude", status: "ready", enabled: true }]),
+      listModels: async (provider) => routingModels(provider, [{ id: "default", label: "Default", isDefault: true }]),
     };
     let state: { status: "ready" | "invalid"; values?: { fallbackProvider?: string } } = { status: "ready", values: { fallbackProvider: "codex" } };
     let reads = 0;
@@ -1108,11 +1109,11 @@ describe("runCurator", () => {
     const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
     let fallbackProvider: string | undefined = "codex";
     paseo.providers = {
-      listControls: async (draft) => ({ options: draft.providerOptions }),
-      waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }, { provider: "claude", status: "available", enabled: true }] }),
-      listModels: async () => {
+      listControls: routingControls,
+      waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }, { provider: "claude", status: "ready", enabled: true }]),
+      listModels: async (provider) => {
         fallbackProvider = undefined;
-        return { models: [{ id: "default", label: "Default", isDefault: true }] };
+        return routingModels(provider, [{ id: "default", label: "Default", isDefault: true }]);
       },
     };
     const adapter = new PaseoAdapter(paseo, { read: async () => ({ status: "ready", values: { fallbackProvider } }) });
@@ -1132,9 +1133,9 @@ describe("runCurator", () => {
   it("fails closed when the host lacks native control resolution", async () => {
     const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
     paseo.providers = {
-      listControls: async (draft) => ({ options: draft.providerOptions }),
-      waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }, { provider: "claude", status: "available", enabled: true }] }),
-      listModels: async () => ({ models: [{ id: "default", label: "Default" }] }),
+      listControls: routingControls,
+      waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }, { provider: "claude", status: "ready", enabled: true }]),
+      listModels: async (provider) => routingModels(provider, [{ id: "default", label: "Default" }]),
     };
     delete paseo.providers.listControls;
     const adapter = new PaseoAdapter(paseo, { read: async () => ({ status: "ready", values: { fallbackProvider: "codex" } }) });
@@ -1154,22 +1155,22 @@ describe("provider-agnostic curator routing", () => {
   });
   it("uses only the explicitly chosen provider and model, without discovery-order preferences", async () => {
     const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
-    paseo.providers!.listModels = async () => ({ models: [{ id: "default", label: "Default" }, { id: "chosen/model", label: "Chosen" }] });
+    paseo.providers!.listModels = async (provider) => routingModels(provider, [{ id: "default", label: "Default" }, { id: "chosen/model", label: "Chosen" }]);
     const settings = { read: async () => ({ status: "ready" as const, values: { fallbackProvider: "claude", fallbackModel: "chosen/model" } }) };
     await new PaseoAdapter(paseo, settings).runCurator({ id: "source", provider: "hermes/model", cwd: "/repo" }, "turn", PROMPT);
     expect(createCalls.map(c => c.config.provider)).toEqual(["claude/chosen/model"]);
   });
   it("does not send to disabled providers even if they advertise safe-sounding modes", async () => {
     const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
-    paseo.providers!.waitForReady = async () => ({ entries: [{ provider: "codex", status: "available", enabled: false }] });
+    paseo.providers!.waitForReady = async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: false }]);
     await expect(new PaseoAdapter(paseo).runCurator({ id: "source", provider: "codex/model", cwd: "/repo" }, "turn", PROMPT)).rejects.toThrow();
     expect(createCalls).toHaveLength(0);
   });
   it("revokes a fallback model change while native control resolution is pending", async () => {
     const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
     let fallbackModel = "one";
-    paseo.providers!.listModels = async () => ({ models: [{ id: "one", label: "One" }, { id: "two", label: "Two" }] });
-    paseo.providers!.listControls = async draft => { fallbackModel = "two"; return { options: draft.providerOptions }; };
+    paseo.providers!.listModels = async (provider) => routingModels(provider, [{ id: "one", label: "One" }, { id: "two", label: "Two" }]);
+    paseo.providers!.listControls = async draft => { fallbackModel = "two"; return routingControls(draft); };
     const settings = { read: async () => ({ status: "ready" as const, values: { fallbackProvider: "claude", fallbackModel } }) };
     await expect(new PaseoAdapter(paseo, settings).runCurator({ id: "source", provider: "hermes/model", cwd: "/repo" }, "turn", PROMPT)).rejects.toThrow();
     expect(createCalls).toHaveLength(0);

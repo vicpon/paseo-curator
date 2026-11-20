@@ -1,3 +1,4 @@
+import { routingSnapshot, routingModels, routingControls } from "../routing-fixtures";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -82,9 +83,9 @@ describe("curator plugin end to end", () => {
     const results = new Map<string, string>();
     const adapter = new PaseoAdapter({
       providers: {
-        waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }] }),
-        listModels: async () => ({ models: [] }),
-        listControls: async (draft: { providerOptions: Record<string, unknown> }) => ({ options: draft.providerOptions }),
+        waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }]),
+        listModels: async (provider: string) => routingModels(provider, []),
+        listControls: routingControls,
       },
       agents: {
         ref: () => { throw new Error("unused"); },
@@ -159,9 +160,9 @@ describe("curator plugin end to end", () => {
     };
     const paseo = {
       providers: {
-        waitForReady: async () => ({ entries: [{ provider: "codex", status: "available", enabled: true }] }),
-        listModels: async () => ({ models: [] }),
-        listControls: async (draft: { providerOptions: Record<string, unknown> }) => ({ options: draft.providerOptions }),
+        waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }]),
+        listModels: async (provider: string) => routingModels(provider, []),
+        listControls: routingControls,
       },
       agents: {
         list: async () => ({ entries: [], pageInfo: {}, requestId: "req-1" }),

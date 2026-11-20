@@ -1,3 +1,5 @@
+import { liveSnapshot, routingSnapshot, routingModels, routingControls } from "./routing-fixtures";
+import type { RoutingProviders } from "../shared/routing";
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -19,11 +21,11 @@ import { CuratorSettings } from "../client/settings";
 afterEach(cleanup);
 function setup(values: { fallbackProvider?: string; fallbackModel?: string } = {}) {
   const save = vi.fn();
-  const entries = ["omp", "claude", "codex", "hermes", "opencode"].map(provider => ({ provider, enabled: true, status: "available" }));
+  const entries = liveSnapshot.entries.filter(entry => ["omp", "claude", "codex", "hermes", "opencode"].includes(entry.provider));
   const providers = {
-    waitForReady: vi.fn(async () => ({ entries })),
-    listModels: vi.fn(async () => ({ models: [{ id: "model-a", label: "Model A" }, { id: "vendor/model-b", label: "Model B" }] })),
-    listControls: vi.fn(async (draft: { providerOptions: unknown }) => ({ options: draft.providerOptions })),
+    waitForReady: vi.fn<RoutingProviders["waitForReady"]>(async () => routingSnapshot(entries)),
+    listModels: vi.fn<RoutingProviders["listModels"]>(async provider => routingModels(provider, [{ id: "model-a", label: "Model A" }, { id: "vendor/model-b", label: "Model B" }])),
+    listControls: vi.fn(routingControls),
     refresh: vi.fn(async () => ({})),
   };
   usePaseo.mockReturnValue({ providers });
@@ -37,7 +39,7 @@ describe("routing settings UI", () => {
     contribute({ addTimelineRenderer: () => {}, addSettingsScreen: register } as never);
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ Component: CuratorSettings }));
     render(<CuratorSettings />);
-    await waitFor(() => expect(screen.getByRole("option", { name: "claude" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("option", { name: "Claude" })).toBeTruthy());
     expect((screen.getByLabelText("Fallback provider") as HTMLSelectElement).value).toBe("");
     expect(screen.getAllByRole("button", { name: "Unavailable" })).toHaveLength(3);
     expect(screen.getByText(/source turn.*skill index.*selected provider/i)).toBeTruthy();
@@ -50,7 +52,7 @@ describe("routing settings UI", () => {
     const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
     render(<CuratorSettings />);
     await waitFor(() => expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b"));
-    providers.waitForReady.mockResolvedValue({ entries: [] });
+    providers.waitForReady.mockResolvedValue(routingSnapshot([]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
     await waitFor(() => expect(screen.getByRole("option", { name: /claude.*unavailable/ })).toBeTruthy());
     expect((screen.getByLabelText("Fallback model") as HTMLSelectElement).value).toBe("vendor/model-b");
