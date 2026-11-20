@@ -21,3 +21,12 @@ The manifest uses local `assets/native-*.png` strings so Git and package install
 - Review agents retain provider-native tools, including writes and commands. Structured-operation checks do not confine those tools. Acceptance of that posture remains a registry decision.
 
 See [capture provenance](screenshots/README.md), [routing details](routing.md), and the [documentation index](README.md).
+
+## Public screenshot URLs
+
+Both PNGs are committed in asset revision `687ffeb0b8f2b854d82d5e82b83e28020cdcd978`. These HTTPS URLs pin that exact revision rather than a moving branch:
+
+- [Native routing settings](https://raw.githubusercontent.com/vicpon/paseo-curator/687ffeb0b8f2b854d82d5e82b83e28020cdcd978/assets/native-routing-settings.png)
+- [Native provider menu](https://raw.githubusercontent.com/vicpon/paseo-curator/687ffeb0b8f2b854d82d5e82b83e28020cdcd978/assets/native-routing-providers.png)
+
+The manifest retains package-relative media paths; the registry resolves those at its approved artifact commit. These direct raw URLs are also suitable for a later registry review reply. No reply has been posted.
