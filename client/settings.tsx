@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { Button } from "react-native";
-import { usePaseo, useSettings } from "@getpaseo/plugin/client";
+import { Pressable, Text } from "react-native";
+import { usePaseo, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsRow, SettingsSection, SettingsSelect } from "@getpaseo/plugin/client/ui";
 import { curatorSettings } from "../shared/settings";
 import { discoverRoutingProviders, type RoutingProvider } from "../shared/routing";
 
-export function CuratorSettings() {
+export function CuratorSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
   const state = useSettings(curatorSettings);
   const paseo = usePaseo();
   const [catalog, setCatalog] = useState<RoutingProvider[]>([]);
@@ -59,7 +59,11 @@ export function CuratorSettings() {
   return (
     <SettingsSection title="Curator routing"
       info="Reviews use the source provider and model when safe. The selected provider is used when the source review cannot run. It receives a bounded source turn and skill index under its data policy; tool-less reviews also receive captured skill text. This data can contain file contents and secrets. Read-only tools can read workspace and skill files."
-      trailing={<Button title="Refresh providers" disabled={loading} onPress={() => setRefresh(value => value + 1)} />}>
+      trailing={<Pressable accessibilityRole="button" accessibilityLabel="Refresh providers"
+        accessibilityState={{ disabled: loading }} disabled={loading} onPress={() => setRefresh(value => value + 1)}
+        style={({ pressed }) => ({ padding: 8, minHeight: 44, justifyContent: "center", opacity: loading || pressed ? 0.5 : 1 })}>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Refresh providers</Text>
+      </Pressable>}>
       <SettingsSelect label="Review provider" value={providerValue}
         hint="Choose a provider to allow these reviews; None revokes that permission."
         options={[{ label: "None", value: "" }, ...options]}

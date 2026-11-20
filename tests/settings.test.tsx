@@ -14,13 +14,18 @@ vi.mock("@getpaseo/plugin/client/ui", () => ({
   SettingsRow: ({ label, hint }: { label: string; hint?: string }) => <div>{label}<p>{hint}</p></div>,
 }));
 vi.mock("react-native", () => ({
-  Text: "text",
-  Button: ({ title, onPress, disabled }: { title: string; onPress: () => void; disabled?: boolean }) => <button disabled={disabled} onClick={onPress}>{title}</button>,
+  Text: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  Pressable: ({ children, onPress, disabled, accessibilityLabel }: { children: ReactNode; onPress: () => void; disabled?: boolean; accessibilityLabel?: string }) => <button aria-label={accessibilityLabel} disabled={disabled} onClick={onPress}>{children}</button>,
 }));
 
 import contribute from "../index.client";
 import { CuratorSettings } from "../client/settings";
 
+const theme = { colors: {
+  surface0: "#171b19", surface1: "#202421", surface2: "#272c29", border: "#303632",
+  foreground: "#eeeeee", foregroundMuted: "#aaaaaa", accent: "#8fb996", accentForeground: "#171b19",
+  statusSuccess: "#8fb996", statusWarning: "#e0b25c", statusDanger: "#d48471",
+} };
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 function setup(values: { fallbackProvider?: string; fallbackModel?: string } = {}) {
   const save = vi.fn();
@@ -41,7 +46,7 @@ describe("routing settings UI", () => {
     const { save } = setup();
     contribute({ addTimelineRenderer: () => {}, addSettingsScreen: register } as never);
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ Component: CuratorSettings }));
-    render(<CuratorSettings />);
+    render(<CuratorSettings theme={theme} />);
     await waitFor(() => expect(screen.getByRole("option", { name: "Claude" })).toBeTruthy());
     expect((screen.getByLabelText("Review provider") as HTMLSelectElement).value).toBe("");
     expect(screen.queryAllByRole("button", { name: "Unavailable" })).toHaveLength(0);
@@ -54,7 +59,7 @@ describe("routing settings UI", () => {
   });
   it("preserves the selected provider and nested model across refresh, disappearance and discovery failure", async () => {
     const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
-    render(<CuratorSettings />);
+    render(<CuratorSettings theme={theme} />);
     await waitFor(() => expect((screen.getByLabelText("Review model") as HTMLSelectElement).value).toBe("vendor/model-b"));
     providers.waitForReady.mockResolvedValue(routingSnapshot([]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
@@ -70,7 +75,7 @@ describe("routing settings UI", () => {
   });
   it("saves explicit model changes and can clear fallback while discovery is pending", async () => {
     const { save } = setup({ fallbackProvider: "codex" });
-    render(<CuratorSettings />);
+    render(<CuratorSettings theme={theme} />);
     await screen.findByRole("option", { name: "Model B" });
     fireEvent.change(screen.getByLabelText("Review model"), { target: { value: "vendor/model-b" } });
     expect(save).toHaveBeenCalledWith({ fallbackProvider: "codex", fallbackModel: "vendor/model-b" }, "revision-1");
@@ -80,7 +85,7 @@ describe("routing settings UI", () => {
   it("displays invalid settings and saving errors without silently resetting consent", () => {
     setup();
     useSettings.mockReturnValue({ status: "invalid", revision: "bad", error: "Invalid settings", reset: vi.fn() });
-    render(<CuratorSettings />);
+    render(<CuratorSettings theme={theme} />);
     expect(screen.getByText("Invalid settings")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reset review settings" })).toBeTruthy();
   });
@@ -89,7 +94,7 @@ describe("routing settings UI", () => {
 
 it("removes host-disabled providers from rows and selector on refresh without changing consent", async () => {
   const { providers, save } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
-  render(<CuratorSettings />);
+  render(<CuratorSettings theme={theme} />);
   await screen.findByRole("option", { name: "Claude" });
   providers.waitForReady.mockResolvedValue(routingSnapshot(liveSnapshot.entries.map(e => e.provider === "claude" ? { ...e, enabled: false } : e)));
   fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
@@ -105,7 +110,7 @@ it("removes host-disabled providers from rows and selector on refresh without ch
 
 it("omits blocked names, policy reasons and the entire provider status list", async () => {
   setup();
-  const { container } = render(<CuratorSettings />);
+  const { container } = render(<CuratorSettings theme={theme} />);
   await screen.findByRole("option", { name: "Claude" });
   expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent))
     .toEqual(["None", "Claude", "Codex", "OpenCode"]);
@@ -122,7 +127,7 @@ it("omits blocked names, policy reasons and the entire provider status list", as
 it("hides a saved blocked provider and its model without resetting consent", async () => {
   const { save, providers } = setup({ fallbackProvider: "claude", fallbackModel: "vendor/model-b" });
   providers.listControls.mockResolvedValue({ ...await routingControls({ provider: "claude/model-a", cwd: "." }), options: {} });
-  const { container } = render(<CuratorSettings />);
+  const { container } = render(<CuratorSettings theme={theme} />);
   await screen.findByText(/Saved review provider is inactive/);
   expect(container.textContent).not.toMatch(/fallback/i);
   expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
@@ -137,7 +142,7 @@ it("hides a saved blocked provider and its model without resetting consent", asy
 it("offers only None while checking a saved route and lets None revoke immediately", () => {
   const { providers, save } = setup({ fallbackProvider: "hermes", fallbackModel: "private/model" });
   providers.waitForReady.mockReturnValue(new Promise(() => {}));
-  const { container } = render(<CuratorSettings />);
+  const { container } = render(<CuratorSettings theme={theme} />);
   expect(container.textContent).not.toMatch(/fallback/i);
   expect(Array.from(screen.getByLabelText("Review provider").querySelectorAll("option"), o => o.textContent)).toEqual(["None"]);
   expect(screen.queryByLabelText("Review model")).toBeNull();
@@ -150,7 +155,7 @@ it("logs a fixed discovery failure without exposing the thrown error", async () 
   const log = vi.spyOn(console, "info").mockImplementation(() => {});
   const { providers } = setup();
   providers.waitForReady.mockRejectedValue(new Error("PRIVATE-DISCOVERY-TOKEN"));
-  render(<CuratorSettings />);
+  render(<CuratorSettings theme={theme} />);
   await screen.findByText(/Provider discovery failed/);
   expect(log.mock.calls.flat().join(" ")).toContain("Provider discovery failed");
   expect(log.mock.calls.flat().join(" ")).not.toContain("PRIVATE-");
@@ -164,7 +169,7 @@ it("logs only bounded policy reasons, never host labels, models or raw failures"
     { provider: "claude", label: "PRIVATE-LABEL", enabled: true, status: "ready" },
   ]));
   providers.listModels.mockRejectedValue(new Error("PRIVATE-ERROR-TOKEN"));
-  render(<CuratorSettings />);
+  render(<CuratorSettings theme={theme} />);
   await waitFor(() => expect(screen.getByRole("button", { name: "Refresh providers" }).hasAttribute("disabled")).toBe(false));
   expect(log.mock.calls.flat().join(" ")).toContain("Paseo exposes approval modes");
   expect(log.mock.calls.flat().join(" ")).toContain("Provider discovery failed; refresh to retry.");
@@ -174,7 +179,7 @@ it("logs only bounded policy reasons, never host labels, models or raw failures"
 
 it("clears stale ready rows and provider choices when refreshing an unreachable host", async () => {
   const { providers, save } = setup({ fallbackProvider: "claude" });
-  render(<CuratorSettings />);
+  render(<CuratorSettings theme={theme} />);
   await screen.findByRole("option", { name: "Claude" });
   providers.waitForReady.mockRejectedValue(new Error("offline"));
   fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
@@ -187,7 +192,7 @@ it("clears stale ready rows and provider choices when refreshing an unreachable 
 
 it("keeps refresh in the routing section without a provider row or diagnostic heading", async () => {
   setup();
-  const { container } = render(<CuratorSettings />);
+  const { container } = render(<CuratorSettings theme={theme} />);
   expect(screen.queryByText(/^Loading providers$/)).toBeNull();
   await screen.findByRole("option", { name: "Claude" });
   expect(screen.queryByText(/^Providers$/)).toBeNull();
