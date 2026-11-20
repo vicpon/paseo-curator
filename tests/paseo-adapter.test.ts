@@ -1026,7 +1026,7 @@ describe("runCurator", () => {
     expect(createCalls).toHaveLength(0);
   });
 
-  it("falls back to discovered omp/model when source provider create fails", async () => {
+  it("falls back to the user-configured provider when source provider create fails", async () => {
     let createCount = 0;
     const paseo: FakePaseoApi = {
       agents: {
@@ -1034,35 +1034,52 @@ describe("runCurator", () => {
         create: async (options: FakeCreateOptions) => {
           createCount++;
           if (createCount === 1) throw new Error("provider rejected");
-          return {
-            id: options.agentId,
-            waitForFinish: async () => idleWaitResult("saved outcome"),
-          };
+          return { id: options.agentId, waitForFinish: async () => idleWaitResult("saved outcome") };
         },
       },
       providers: {
-        waitForReady: async () => ({ providers: [
-          { id: "codex", available: true },
-          { id: "claude", available: true },
-        ] }),
-        listModes: async () => ({ modes: [{ id: "plan", label: "Plan Mode (Always Ask)" }] }),
-        listModels: async (provider: string) => ({ models: [{ id: `${provider}-default-model`, label: "Default", isDefault: true }] }),
+        waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+        listModes: async () => ({ modes: [{ id: "auto-review", label: "Auto-review" }] }),
+        listModels: async () => ({ models: [{ id: "codex-default", label: "Default", isDefault: true }] }),
       },
     };
+    const settings = {
+      read: async () => ({ status: "ready" as const, values: { fallbackProvider: "codex" } }),
+      subscribe: () => () => {},
+    };
 
-    const adapter = new PaseoAdapter(paseo as any);
+    const adapter = new PaseoAdapter(paseo as any, settings);
     const result = await adapter.runCurator(
       { id: "agent-hermes", provider: "hermes/zai:glm-5.3", cwd: "/tmp" },
       "turn-fb",
       PROMPT,
     );
     expect(result.finalText).toBe("saved outcome");
-    // First attempt (hermes) fails, second (claude — first preferred) succeeds
-    expect(createCount).toBe(2);
+    expect(createCount).toBe(2); // first (hermes) fails, second (codex fallback) succeeds
   });
 
-  it("caches fallback discovery and does not re-query on subsequent failures", async () => {
-    let discoveryCalls = 0;
+  it("skips when no fallback provider is configured and source provider fails", async () => {
+    const paseo: FakePaseoApi = {
+      agents: {
+        ref: () => { throw new Error("must not ref"); },
+        create: async () => { throw new Error("provider rejected"); },
+      },
+    };
+    const settings = {
+      read: async () => ({ status: "ready" as const, values: { fallbackProvider: undefined } }),
+      subscribe: () => () => {},
+    };
+    const adapter = new PaseoAdapter(paseo as any, settings);
+    const promise = adapter.runCurator(
+      { id: "agent-hermes", provider: "hermes/zai:glm-5.3", cwd: "/tmp" },
+      "turn-fb",
+      PROMPT,
+    );
+    await expect(promise).rejects.toThrow(/create-failed/);
+  });
+
+  it("caches fallback resolution — settings read and provider discovery only run once", async () => {
+    let settingsReadCount = 0;
     const paseo: FakePaseoApi = {
       agents: {
         ref: () => { throw new Error("must not ref"); },
@@ -1072,16 +1089,19 @@ describe("runCurator", () => {
         },
       },
       providers: {
-        waitForReady: async () => { discoveryCalls++; return { providers: [{ id: "claude", available: true }] }; },
-        listModes: async () => ({ modes: [{ id: "plan", label: "Plan Mode (Always Ask)" }] }),
-        listModels: async () => ({ models: [{ id: "claude-model-x", label: "X", isDefault: true }] }),
+        waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+        listModes: async () => ({ modes: [{ id: "auto-review", label: "Auto-review" }] }),
+        listModels: async () => ({ models: [{ id: "codex-model", label: "X", isDefault: true }] }),
       },
     };
+    const settings = {
+      read: async () => { settingsReadCount++; return { status: "ready" as const, values: { fallbackProvider: "codex" } }; },
+      subscribe: () => () => {},
+    };
 
-    const adapter = new PaseoAdapter(paseo as any);
-    // Two reviews from hermes agents — discovery should only run once
+    const adapter = new PaseoAdapter(paseo as any, settings);
     await adapter.runCurator({ id: "a1", provider: "hermes/zai:glm-5.3", cwd: "/tmp" }, "t1", PROMPT);
     await adapter.runCurator({ id: "a2", provider: "hermes/zai:glm-5.3", cwd: "/tmp" }, "t2", PROMPT);
-    expect(discoveryCalls).toBe(1);
+    expect(settingsReadCount).toBe(1);
   });
 });

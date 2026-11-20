@@ -72,7 +72,7 @@ describe("curator plugin end to end", () => {
       archiveDays: 30,
       maxRetries: 3,
     };
-    const runtime = createProductionRuntime(paseo as never, config, { stateDir });
+    const runtime = createProductionRuntime(paseo as never, undefined, config, { stateDir });
 
     await runtime.start();
     await runtime.handleCompletedTurn(

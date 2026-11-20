@@ -268,76 +268,70 @@ function formatToolCall(
  * reports no older pages.
  */
 export class PaseoAdapter {
-  /** Cached fallback provider/model selection for non-creatable source providers. */
-  private fallbackProviderSelection: string | null | undefined = undefined;
+  /** Cached fallback provider/model after first resolution. */
+  private resolvedFallback: { providerSelection: string; modeId: string | undefined } | null | undefined = undefined;
 
   constructor(
     private readonly paseo: PaseoApiRef,
+    private readonly settings?: {
+      read(): Promise<{
+        status: "ready" | "invalid";
+        values?: { fallbackProvider?: string };
+      }>;
+    },
   ) {}
 
   /**
-   * Discover a fallback provider/model to use when the source agent's
-   * provider cannot create a daemon-side curator agent. Queries all available
-   * providers dynamically — no provider names are hardcoded. Prefers a mode
-   * whose label contains "ask" (case-insensitive) as a heuristic for the most
-   * restricted available mode; falls back to the provider's default mode when
-   * no ask-labelled mode exists. The plugin-owned permission guard provides
-   * the real write-safety enforcement regardless of mode. Caches the result so
-   * discovery only runs once per adapter lifetime.
+   * Resolve the fallback provider for source agents whose provider cannot
+   * create a daemon-side curator agent. Reads the user-configured
+   * `fallbackProvider` setting, then uses `listModels` to find that
+   * provider's default model and `listModes` to find its most restricted
+   * mode. Returns null when no fallback is configured or the provider is
+   * unavailable; result is cached for the adapter's lifetime.
    */
-  private async discoverFallbackProvider(): Promise<{ providerSelection: string; modeId: string | undefined } | null> {
-    if (this.fallbackProviderSelection !== undefined) {
-      if (this.fallbackProviderSelection === null) return null;
-      const [providerSelection, modeId] = this.fallbackProviderSelection.split("|");
-      return { providerSelection: providerSelection!, modeId: modeId || undefined };
-    }
+  private async resolveFallbackProvider(): Promise<{ providerSelection: string; modeId: string | undefined } | null> {
+    if (this.resolvedFallback !== undefined) return this.resolvedFallback;
 
-    if (!this.paseo.providers) {
-      this.fallbackProviderSelection = null;
+    const providerId = await this.readFallbackSetting();
+    if (!providerId || !this.paseo.providers) {
+      this.resolvedFallback = null;
       return null;
     }
 
     try {
-      const snap = await this.paseo.providers.waitForReady({ timeoutMs: 10_000 });
-      const available = snap.providers.filter(p => p.available);
-
-      // Prefer claude and codex (GPT) first; fall through to any other
-      // available provider. No model IDs are hardcoded — listModels picks
-      // the provider's own default.
-      const PREFERRED_FIRST = ["codex", "claude"];
-      const sorted = [
-        ...PREFERRED_FIRST.map(id => available.find(p => p.id === id)).filter(Boolean),
-        ...available.filter(p => !PREFERRED_FIRST.includes(p.id)),
-      ] as typeof available;
-
-      for (const p of sorted) {
-        try {
-          const models = await this.paseo.providers.listModels(p.id);
-          const model =
-            models.models.find(m => m.isDefault)?.id ?? models.models[0]?.id;
-          if (!model) continue;
-
-          // Prefer a mode with "ask" in its label (provider-agnostic heuristic
-          // for the most restricted available mode).
-          const modes = await this.paseo.providers.listModes(p.id);
-          const askMode = modes.modes.find(m =>
-            m.label.toLowerCase().includes("ask"),
-          );
-          const modeId = askMode?.id;
-
-          const selection = `${p.id}/${model}`;
-          this.fallbackProviderSelection = `${selection}|${modeId ?? ""}`;
-          return { providerSelection: selection, modeId };
-        } catch {
-          // This provider is unavailable or can't list models/modes — try next.
-        }
+      const models = await this.paseo.providers.listModels(providerId);
+      const model =
+        models.models.find(m => m.isDefault)?.id ?? models.models[0]?.id;
+      if (!model) {
+        this.resolvedFallback = null;
+        return null;
       }
+
+      const modes = await this.paseo.providers.listModes(providerId);
+      const askMode = modes.modes.find(m =>
+        m.label.toLowerCase().includes("ask"),
+      );
+
+      this.resolvedFallback = {
+        providerSelection: `${providerId}/${model}`,
+        modeId: askMode?.id,
+      };
     } catch {
-      // providers API unavailable — treat as no fallback
+      this.resolvedFallback = null;
     }
 
-    this.fallbackProviderSelection = null;
-    return null;
+    return this.resolvedFallback;
+  }
+
+  private async readFallbackSetting(): Promise<string | undefined> {
+    if (!this.settings) return undefined;
+    try {
+      const state = await this.settings.read();
+      if (state.status === "ready") return state.values?.fallbackProvider;
+    } catch {
+      // settings unavailable
+    }
+    return undefined;
   }
 
   async listLoadedSkillNames(agentId: string): Promise<string[]> {
@@ -598,7 +592,7 @@ export class PaseoAdapter {
         providerSelection = `${providerSelection}/${model}`;
       } else {
         // No model in snapshot — go straight to fallback if available.
-        const fallback = await this.discoverFallbackProvider();
+        const fallback = await this.resolveFallbackProvider();
         if (fallback === null) {
           unregisterCurator();
           throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
@@ -608,9 +602,9 @@ export class PaseoAdapter {
     }
 
     let handle: AgentHandle;
-    // modeId for the initial attempt: "ask" is known to work for omp. For
-    // other providers it may not exist; the fallback path uses the discovered
-    // mode.
+    // modeId for the initial attempt: "ask" is a common restricted-mode ID
+    // (e.g. omp). For other providers the ask-labelled mode may differ;
+    // the fallback path uses the mode resolved from listModes.
     let modeId: string | undefined = "ask";
     let usedFallback = false;
 
@@ -635,7 +629,7 @@ export class PaseoAdapter {
     } catch {
       // First attempt failed. Try the fallback provider if we haven't already.
       if (!usedFallback) {
-        const fallback = await this.discoverFallbackProvider();
+        const fallback = await this.resolveFallbackProvider();
         if (fallback !== null && fallback.providerSelection !== providerSelection) {
           providerSelection = fallback.providerSelection;
           modeId = fallback.modeId;

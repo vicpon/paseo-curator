@@ -29,6 +29,8 @@ import type {
   PluginLifecycleEvents,
   PluginServerContext,
 } from "@getpaseo/plugin/server";
+import { defineSettings } from "@getpaseo/plugin";
+import { z } from "zod";
 
 
 import { CuratorOrchestrator, type SkillSummary } from "./server/orchestrator";
@@ -414,13 +416,14 @@ function safeLstat(path: string) {
  */
 export function createProductionRuntime(
   paseo: PaseoApi,
+  settings?: import("@getpaseo/plugin/server").PluginSettings<typeof curatorSettings.schema>,
   config: PluginConfig = DEFAULT_PLUGIN_CONFIG,
   options: { stateDir?: string } = {},
 ): CuratorRuntime {
   const skillRoot = expandHome(config.skillRoot);
   // `PaseoApiRef` mirrors the real `PaseoApi` for exactly the surface the
-  // adapter consumes; cast through `unknown` (type-only SDK import, no `any`).
-  const adapter = new PaseoAdapter(paseo as unknown as PaseoApiRef);
+  // adapter consumes; cast through `unknown` (type-only SDK import, no `any`).\
+  const adapter = new PaseoAdapter(paseo as unknown as PaseoApiRef, settings);
 
   const stateDir = options.stateDir ?? expandHome(STATE_DIR);
   mkdirSync(stateDir, { recursive: true });
@@ -585,12 +588,34 @@ export function createProductionRuntime(
   };
 }
 
+/** Plugin settings — user-configurable via Paseo's settings UI. */
+const curatorSettings = defineSettings({
+  id: "curator",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    /**
+     * Provider to use when the source agent's provider cannot create a
+     * background curator agent (e.g. terminal harness agents such as Hermes,
+     * Claude Code, Codex CLI, or OpenCode). Accepts any provider id enabled in
+     * Paseo (e.g. `"codex"` or `"claude"`). The plugin uses that provider's
+     * default model. When omitted, reviews from unsupported source providers
+     * are skipped rather than routed to a different provider.
+     *
+     * The completed source-turn transcript is included in the curator prompt
+     * sent to this provider.
+     */
+    fallbackProvider: z.string().optional(),
+  }),
+});
+
 export default function contribute(server: PluginServerContext): () => Promise<void> {
+  const settings = server.registerSettings(curatorSettings);
   const removePermissionGuard = server.on(
     "agent.permission_requested",
     handleCuratorPermissionRequested,
   );
-  const cleanupRuntime = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo));
+  const cleanupRuntime = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo, settings));
   return async () => {
     try {
       await cleanupRuntime();
