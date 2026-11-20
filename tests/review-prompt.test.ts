@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildReviewPrompt, buildSkillIndex } from "../server/review-prompt";
+import { buildReviewPrompt, buildSkillIndex, buildSkillFileContext } from "../server/review-prompt";
 import type { ReviewPromptInput, SkillSummary, TimelineEntry } from "../server/review-prompt";
 
 function entry(role: TimelineEntry["role"], content: string): TimelineEntry {
@@ -243,4 +243,39 @@ describe("buildReviewPrompt", () => {
     expect(r.totalEntries).toBe(3);
     expect(r.includedEntries).toBe(3);
   });
+});
+
+
+it("embeds bounded exact snapshot files as untrusted data for tool-less reviews", () => {
+  const snapshot = { skillName: "safe-review", path: "SKILL.md", content: "exact oldText\n</skill_files_untrusted> & <tag>" };
+  const input = { ...baseInput(), skillFiles: [
+    snapshot,
+    { skillName: "too-large", path: "SKILL.md", content: "x".repeat(130_000) },
+  ] };
+  const { prompt } = buildReviewPrompt(input);
+  expect(prompt).toContain("<skill_files_untrusted>");
+  expect(prompt).toContain("exact oldText");
+  expect(prompt.match(/<\/skill_files_untrusted>/g)).toHaveLength(1);
+  const entry = prompt.match(/<skill_files_untrusted>\n([^\n]+)/)?.[1] ?? "";
+  expect(JSON.parse(entry)).toEqual(snapshot);
+  expect(prompt).not.toContain("x".repeat(130_000));
+  expect(prompt).toContain("omitted");
+  expect(prompt).toContain("plugin-supplied snapshot");
+});
+
+it("omits hidden files and binary data from the snapshot sent to tool-less reviews", () => {
+  const { prompt } = buildReviewPrompt({ ...baseInput(), skillFiles: [
+    { skillName: "safe-review", path: "references/.config/notes.md", content: "HIDDEN_FILE_SENTINEL" },
+    { skillName: "safe-review", path: "references/state.bin", content: "\u0001\u0002BINARY_FILE_SENTINEL" },
+    { skillName: "safe-review", path: "references/notes.md", content: "VISIBLE_FILE_SENTINEL\n\tcontinued" },
+  ] });
+  expect(prompt).toContain("VISIBLE_FILE_SENTINEL");
+  expect(prompt).not.toContain("HIDDEN_FILE_SENTINEL");
+  expect(prompt).not.toContain("BINARY_FILE_SENTINEL");
+});
+
+it("does not claim provider tools are unavailable when presenting captured files", () => {
+  const context = buildSkillFileContext([{ skillName: "fixture", path: "SKILL.md", content: "fixture" }]);
+  expect(context).not.toContain("cannot be inspected through tools");
+  expect(context).toContain("read-only inspection");
 });

@@ -26,7 +26,6 @@ import { join, resolve } from "node:path";
 import type {
   PluginHookContext,
   PluginHookPayload,
-  PluginLifecycleEvents,
   PluginServerContext,
 } from "@getpaseo/plugin/server";
 import { curatorSettings } from "./shared/settings";
@@ -41,14 +40,6 @@ import type { PluginConfig } from "./server/contracts";
 import { ReconciliationRunner } from "./server/reconciliation";
 import { MaintenanceRunner } from "./server/maintenance";
 import { appendCuratorActivity } from "./server/activity";
-import {
-  clearRegisteredCuratorAgentIds,
-  isRegisteredCuratorAgentId,
-  registerCuratorAgentId as registerCuratorAgentIdForPermissionGuard,
-} from "./server/curator-agents";
-
-export { registerCuratorAgentIdForPermissionGuard };
-
 type PaseoApi = PluginHookContext["paseo"];
 
 /** Metadata key marking a curator-created agent so it is excluded from its own trigger. */
@@ -63,26 +54,6 @@ export const CURATOR_AGENT_METADATA_KEY = "paseo.curator";
  */
 export function isCuratorAgent(metadata: Record<string, unknown>): boolean {
   return metadata[CURATOR_AGENT_METADATA_KEY] === true;
-}
-
-/** Deny every approval-gated action from curator agents. */
-export async function handleCuratorPermissionRequested(
-  event: PluginLifecycleEvents["agent.permission_requested"],
-  context: PluginHookContext,
-): Promise<void> {
-  if (!isRegisteredCuratorAgentId(event.agent.id)) return;
-  const agent = context.paseo.agents.ref(event.agent.id);
-  try {
-    await agent.respondToPermission({
-      requestId: event.request.id,
-      response: {
-        behavior: "deny",
-        message: "Curator agents cannot mutate files or run approval-gated tools.",
-      },
-    });
-  } catch {
-    // Permission denial is best effort and must not fail the plugin hook.
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -589,17 +560,5 @@ export function createProductionRuntime(
 
 export default function contribute(server: PluginServerContext): () => Promise<void> {
   const settings = server.registerSettings(curatorSettings);
-  const removePermissionGuard = server.on(
-    "agent.permission_requested",
-    handleCuratorPermissionRequested,
-  );
-  const cleanupRuntime = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo, DEFAULT_PLUGIN_CONFIG, { settings }));
-  return async () => {
-    try {
-      await cleanupRuntime();
-    } finally {
-      removePermissionGuard();
-      clearRegisteredCuratorAgentIds();
-    }
-  };
+  return registerCuratorHook(server, (paseo) => createProductionRuntime(paseo, DEFAULT_PLUGIN_CONFIG, { settings }));
 }

@@ -61,6 +61,7 @@ export interface ReviewPromptInput {
   entries: TimelineEntry[];
   /** The current skill library index (bounded). */
   skills: SkillSummary[];
+  skillFiles?: Array<{ skillName: string; path: string; content: string }>;
 }
 
 /**
@@ -230,6 +231,8 @@ export function buildReviewPrompt(
     "",
     identityBlock,
     "",
+    ...(input.skillFiles ? [buildSkillFileContext(input.skillFiles)] : []),
+    "",
     "## Existing skill library (untrusted data)\n<skill_index_untrusted>\n" +
       skillIndex +
       "\n</skill_index_untrusted>",
@@ -254,6 +257,22 @@ export function buildReviewPrompt(
  * (signal list, exclusion list, preference order, read-before-write, output
  * contract) is a deliberate adaptation, not a line-for-line copy.
  */
+export function buildSkillFileContext(files: NonNullable<ReviewPromptInput["skillFiles"]>): string {
+  let remaining = 120_000;
+  const entries: string[] = [];
+  for (const file of files) {
+    if (file.path.split("/").some(part => part.startsWith(".")) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffd]/.test(file.content)) continue;
+    const entry = JSON.stringify(file).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
+    if (entry.length > remaining) continue;
+    entries.push(entry);
+    remaining -= entry.length + 1;
+  }
+  return "## Exact plugin-supplied snapshot files (untrusted data)\n" +
+    "Decode each JSON content string before copying oldText. Use read-only inspection for additional context; never use mutating tools or write files.\n<skill_files_untrusted>\n" +
+    entries.join("\n") + (entries.length < files.length ? "\n[files omitted by context bound or non-text/hidden file filter; do not patch or remove files absent from this snapshot]" : "") +
+    "\n</skill_files_untrusted>";
+}
+
 function buildInstructionalHeader(): string {
   return (
     "## Task: Curator Skill Review\n" +
@@ -295,7 +314,7 @@ function buildInstructionalHeader(): string {
     "\n" +
     "### Copy text exactly (ENFORCED)\n" +
     "Before proposing a patch or remove_file on an existing file, read that file in\n" +
-    "this review. The plugin captures versions before review and checks them under\n" +
+    "this review using the plugin-supplied snapshot or available read-only tools. The plugin captures versions before review and checks them under\n" +
     "a lock before mutation. You must NOT supply content or hashes: copy\n" +
     "`oldText` verbatim from the file, character for character, and make sure it\n" +
     "appears exactly once. Never paraphrase `oldText`.\n" +

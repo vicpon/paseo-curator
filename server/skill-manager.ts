@@ -174,7 +174,7 @@ export type BatchReconciliation =
  *    the locks are released and the batch is committed.
  */
 export class SkillManager {
-  private readonly reviewSnapshots = new WeakMap<ReviewSnapshot, Map<string, string>>();
+  private readonly reviewSnapshots = new WeakMap<ReviewSnapshot, { versions: Map<string, string>; files: Array<{ skillName: string; path: string; content: string }> }>();
   private readonly skillRoot: string;
   private readonly faultInjector?: FaultInjector;
   private readonly restoreSkillImpl: RestoreSkillFn;
@@ -198,19 +198,28 @@ export class SkillManager {
 
   captureReviewSnapshot(): ReviewSnapshot {
     const versions = new Map<string, string>();
+    const files: Array<{ skillName: string; path: string; content: string }> = [];
     for (const entry of readdirSync(this.skillRoot, { withFileTypes: true })) {
       if (!/^[a-z0-9][a-z0-9_-]*$/.test(entry.name)) continue;
       if (!entry.isDirectory()) continue;
       verifyContained(this.skillRoot, join(this.skillRoot, entry.name));
-      versions.set(entry.name, this.snapshotVersion(snapshotSkill(this.skillRoot, entry.name)));
+      const snapshot = snapshotSkill(this.skillRoot, entry.name);
+      versions.set(entry.name, this.snapshotVersion(snapshot));
+      for (const [path, content] of snapshot.files) files.push({ skillName: entry.name, path, content });
     }
     const token = Object.freeze({});
-    this.reviewSnapshots.set(token, versions);
+    this.reviewSnapshots.set(token, { versions, files });
     return token;
   }
 
+  reviewSkillFiles(token: ReviewSnapshot): Array<{ skillName: string; path: string; content: string }> {
+    const snapshot = this.reviewSnapshots.get(token);
+    if (!snapshot) throw new Error("missing pre-review snapshot");
+    return snapshot.files.map(file => ({ ...file })).sort((a, b) => a.skillName.localeCompare(b.skillName) || a.path.localeCompare(b.path));
+  }
+
   private validateReviewVersions(token: ReviewSnapshot | undefined, snapshots: Map<string, SkillSnapshot>): string | null {
-    const versions = token && this.reviewSnapshots.get(token);
+    const versions = token && this.reviewSnapshots.get(token)?.versions;
     if (!versions) return "missing pre-review snapshot";
     for (const [name, snapshot] of snapshots) {
       const expected = versions.get(name);

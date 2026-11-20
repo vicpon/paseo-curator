@@ -1,8 +1,12 @@
 {
   "id": "curator",
   "name": "Curator",
-  "description": "Automatic guarded skill learning from completed Paseo turns",
-  "media": [],
+  "icon": "assets/icon.png",
+  "description": "Automatically turns lessons from completed Paseo work into reusable skills for future agents.",
+  "media": [
+    "assets/native-routing-settings.png",
+    "assets/native-routing-providers.png"
+  ],
   "build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]],
   "requirements": {
     "paseo": ">=0.16.0-beta.2"

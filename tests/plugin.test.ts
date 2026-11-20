@@ -27,11 +27,6 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import * as serverModule from "../index.server";
-import {
-  clearRegisteredCuratorAgentIds,
-  isRegisteredCuratorAgentId,
-  registerCuratorAgentId,
-} from "../server/curator-agents";
 import type {
   PluginHookAgent,
   PluginHookContext,
@@ -321,78 +316,15 @@ describe("isCuratorAgent (existing export)", () => {
   });
 });
 
-describe("curator permission guard", () => {
-  it("denies every permission requested by a curator agent and ignores source agents", async () => {
-    const handler = (serverModule as unknown as {
-      handleCuratorPermissionRequested?: (event: unknown, context: unknown) => Promise<void>;
-    }).handleCuratorPermissionRequested;
-    const register = (serverModule as unknown as {
-      registerCuratorAgentIdForPermissionGuard?: (agentId: string) => () => void;
-    }).registerCuratorAgentIdForPermissionGuard;
-    expect(handler).toBeTypeOf("function");
-    expect(register).toBeTypeOf("function");
-    const responses: unknown[] = [];
-    const context = {
-      paseo: { agents: { ref: () => ({
-        respondToPermission: async (response: unknown) => { responses.push(response); },
-      }) } },
-    };
-
-    const unregister = register!("curator-1");
-    await handler!({
-      agent: { id: "curator-1" },
-      request: { id: "permission-1" },
-    }, context);
-    await handler!({
-      agent: { id: "source-1" },
-      request: { id: "permission-2" },
-    }, context);
-
-    expect(responses).toEqual([{
-      requestId: "permission-1",
-      response: {
-        behavior: "deny",
-        message: "Curator agents cannot mutate files or run approval-gated tools.",
-      },
-    }]);
-    unregister();
-  });
-
-  it("ignores a source agent that only spoofs the curator label", async () => {
-    const handler = (serverModule as unknown as {
-      handleCuratorPermissionRequested?: (event: unknown, context: unknown) => Promise<void>;
-    }).handleCuratorPermissionRequested;
-    expect(handler).toBeTypeOf("function");
-    const responses: unknown[] = [];
-    const context = {
-      paseo: { agents: { ref: () => ({
-        refresh: async () => ({ agent: { labels: { "paseo.curator": "true" } } }),
-        respondToPermission: async (response: unknown) => { responses.push(response); },
-      }) } },
-    };
-
-    await handler!({
-      agent: { id: "curator-race" },
-      request: { id: "permission-race" },
-    }, context);
-
-    expect(responses).toEqual([]);
-  });
-});
-
-describe("curator agent registry", () => {
-  afterEach(() => clearRegisteredCuratorAgentIds());
-
-  it("expires retained curator IDs and supports explicit cleanup", () => {
-    const unregister = registerCuratorAgentId("curator-expiring", 10);
-    expect(isRegisteredCuratorAgentId("curator-expiring", 9)).toBe(true);
-    expect(isRegisteredCuratorAgentId("curator-expiring", 10)).toBe(false);
-
-    registerCuratorAgentId("curator-cleanup", 100);
-    clearRegisteredCuratorAgentIds();
-    expect(isRegisteredCuratorAgentId("curator-cleanup", 1)).toBe(false);
-    unregister();
-  });
+it("does not register a permission policy for curator or ordinary source agents", async () => {
+  const events: string[] = [];
+  const cleanup = serverModule.default({
+    registerSettings: () => ({}),
+    on: (event: string) => { events.push(event); return () => {}; },
+    addHook: () => () => {},
+  } as unknown as PluginServerContext);
+  expect(events).not.toContain("agent.permission_requested");
+  await cleanup();
 });
 
 // ---------------------------------------------------------------------------

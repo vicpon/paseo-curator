@@ -1,28 +1,90 @@
-import { useSettings } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsSection, SettingsSelect } from "@getpaseo/plugin/client/ui";
+import { useEffect, useState } from "react";
+import { Pressable, Text } from "react-native";
+import { usePaseo, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { SettingsAction, SettingsRow, SettingsSection, SettingsSelect } from "@getpaseo/plugin/client/ui";
 import { curatorSettings } from "../shared/settings";
+import { discoverRoutingProviders, type RoutingProvider } from "../shared/routing";
 
-export function CuratorSettings() {
+export function CuratorSettings({ theme }: Pick<PluginSurfaceProps, "theme">) {
   const state = useSettings(curatorSettings);
+  const paseo = usePaseo();
+  const [catalog, setCatalog] = useState<RoutingProvider[]>([]);
+  const [refresh, setRefresh] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    setLoading(true);
+    setError(null);
+    setCatalog([]);
+    void (async () => {
+      if (refresh > 0) await paseo.providers.refresh();
+      const next = await discoverRoutingProviders(paseo.providers);
+      if (!disposed) {
+        // Reasons are fixed discovery messages; never log host labels, models or raw errors.
+        for (const item of next.filter(p => !p.supported)) {
+          console.info("[curator] Provider omitted from review choices:", item.reason);
+        }
+        setCatalog(next.filter(p => p.supported));
+      }
+    })().catch(() => {
+      if (!disposed) {
+        console.info("[curator] Provider discovery failed; refresh to retry.");
+        setError("Provider discovery failed. Refresh to retry; your selection is preserved.");
+      }
+    }).finally(() => { if (!disposed) setLoading(false); });
+    return () => { disposed = true; };
+  }, [paseo, refresh]);
+
   if (state.status !== "ready") {
     return (
       <SettingsSection title="Curator routing">
         <SettingsAction label={state.status === "loading" ? "Loading settings" : state.error}
-          actionLabel="Reset fallback" disabled={state.status === "loading" || state.saving}
+          actionLabel="Reset review settings" disabled={state.status === "loading" || state.saving}
           onPress={() => { void state.reset(); }} />
       </SettingsSection>
     );
   }
+  const selected = state.values.fallbackProvider;
+  const provider = catalog.find(p => p.id === selected);
+  const options = catalog.filter(p => p.supported).map(p => ({ label: p.label, value: p.id }));
+  const inactive = !!selected && !options.some(p => p.value === selected);
+  // Paseo displays an unmatched value as the trigger caption, without adding a menu choice.
+  const providerValue = inactive ? (loading ? "Saved review provider (checking host)" : "Saved review provider inactive") : selected ?? "";
+  const models = provider?.models.map(model => ({ label: model.label, value: model.id })) ?? [];
+  const selectedModel = state.values.fallbackModel;
+  if (selectedModel && !models.some(m => m.value === selectedModel)) {
+    models.push({ label: `${selectedModel} (unavailable; selection preserved)`, value: selectedModel });
+  }
   return (
     <SettingsSection title="Curator routing"
-      info="Fallback sends the bounded source turn and skill index to Codex under its data policy. The turn can contain file contents and secrets. Codex must advertise read-only mode; otherwise the review fails without being sent.">
-      <SettingsSelect label="Fallback provider" value={state.values.fallbackProvider ?? ""}
-        hint="Used only when the source route is unavailable or lacks a supported read-only policy. None disables cross-provider routing."
-        options={[{ label: "None", value: "" }, { label: "Codex (read-only)", value: "codex" }]}
+      info="Reviews normally use the source agent’s provider and model. Your selection is used if that review cannot run. Review content may include file contents or secrets and is subject to the receiving provider’s data policy. The reviewer uses normal tool permissions."
+      trailing={<Pressable accessibilityRole="button" accessibilityLabel="Refresh providers"
+        accessibilityState={{ disabled: loading }} disabled={loading} onPress={() => setRefresh(value => value + 1)}
+        style={({ pressed }) => ({ padding: 8, minHeight: 44, justifyContent: "center", opacity: loading || pressed ? 0.5 : 1 })}>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Refresh providers</Text>
+      </Pressable>}>
+      <SettingsSelect label="Review provider" value={providerValue}
+        hint="Choose a provider to allow these reviews; None revokes that permission."
+        options={[{ label: "None", value: "" }, ...options]}
         disabled={state.saving} error={state.saveError}
-        onValueChange={(value) => {
-          void state.save(value === "codex" ? { fallbackProvider: "codex" } : {}, state.revision);
+        onValueChange={value => {
+          if (value === "") void state.save({}, state.revision);
+          else if (!loading && !error && catalog.some(p => p.id === value && p.supported)) {
+            void state.save({ fallbackProvider: value }, state.revision);
+          }
         }} />
+      {inactive && !loading && <SettingsRow label="Saved review provider is inactive. Choose a provider or None; your saved choice is preserved." />}
+      {selected && provider && <SettingsSelect label="Review model" value={selectedModel ?? ""}
+        hint="Use the provider default or pin a model. Refresh preserves your choice; unavailable models cannot run."
+        options={[{ label: "Provider default", value: "" }, ...models]}
+        disabled={state.saving || loading || !!error || !provider?.supported}
+        onValueChange={value => {
+          if (value === "" || provider?.models.some(model => model.id === value)) {
+            void state.save({ fallbackProvider: selected, ...(value ? { fallbackModel: value } : {}) }, state.revision);
+          }
+        }} />}
+      {error && <SettingsRow label={error} />}
     </SettingsSection>
   );
 }

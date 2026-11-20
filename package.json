@@ -2,14 +2,18 @@
   "name": "curator",
   "private": true,
   "version": "0.1.0",
-  "description": "Daemon-side automatic skill learning for Paseo",
+  "description": "Automatically turns lessons from completed Paseo work into reusable skills for future agents.",
   "license": "MIT",
   "type": "module",
   "files": [
     "paseo-plugin.json",
+    "assets/",
     "README.md",
     "OVERVIEW.md",
     "OVERVIEW.*.md",
+    "docs/routing.md",
+    "docs/listing.md",
+    "docs/screenshots/README.md",
     "index.client.tsx",
     "index.server.ts",
     "client/",
@@ -20,22 +24,29 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "preview:settings": "vite --config tests/ui/vite.config.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@getpaseo/protocol": "0.16.0-beta.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@getpaseo/client": "0.16.0-beta.2",
     "@getpaseo/plugin": "0.16.0-beta.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^26.6.6",
     "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.3.0",
+    "jsdom": "^31.0.1",
     "react": "^19.1.0",
+    "react-dom": "^19.1.0",
     "react-native": "^0.81.5",
     "typescript": "^5.9.3",
+    "vite": "^7.3.8",
     "vitest": "^3.2.0"
   },
   "peerDependencies": {
