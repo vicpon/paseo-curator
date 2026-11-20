@@ -295,8 +295,8 @@ function buildInstructionalHeader(): string {
     "\n" +
     "### Copy text exactly (ENFORCED)\n" +
     "Before proposing a patch or remove_file on an existing file, read that file in\n" +
-    "this review. The plugin re-reads the file under a lock and applies the change\n" +
-    "against its own snapshot, so you must NOT supply content or hashes: copy\n" +
+    "this review. The plugin captures versions before review and checks them under\n" +
+    "a lock before mutation. You must NOT supply content or hashes: copy\n" +
     "`oldText` verbatim from the file, character for character, and make sure it\n" +
     "appears exactly once. Never paraphrase `oldText`.\n" +
     "\n" +

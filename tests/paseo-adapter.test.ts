@@ -106,7 +106,7 @@ interface FakeTimelineEntry {
 // ===========================================================================
 
 const AGENT_ID = "agent-001";
-const AGENT_PROVIDER = "provider/example-model";
+const AGENT_PROVIDER = "codex/example-model";
 const AGENT_CWD = "/workspace/app";
 
 /**
@@ -777,12 +777,12 @@ describe("listLoadedSkillNames", () => {
  * the same turn.
  */
 
-const CURATOR_IDEMPOTENCY_KEY = "paseo-curator:agent-001:turn-002";
+const CURATOR_IDEMPOTENCY_KEY = "paseo-curator:agent-001:turn-002:codex/example-model:read-only";
 const CURATOR_TITLE = "Curator: agent-001 / turn-002";
 
 const expectedCreateOptions = (sourceId: string, turnId: string, prompt: string): FakeCreateOptions => ({
   agentId: "00000000-0000-5000-8000-000000000000",
-  config: { provider: AGENT_PROVIDER, modeId: "ask" },
+  config: { provider: AGENT_PROVIDER, modeId: "read-only" },
   cwd: AGENT_CWD,
   parent: sourceId,
   prompt,
@@ -816,6 +816,11 @@ function makeFakeCreate(
   const createCalls: FakeCreateOptions[] = [];
   const waitCalls: number[] = [];
   const paseo: FakePaseoApi = {
+    providers: {
+      waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+      listModes: async () => ({ modes: [{ id: "read-only", label: "Read only" }] }),
+      listModels: async () => ({ models: [] }),
+    },
     agents: {
       ref: (id: string) => {
         throw new Error(`runCurator must not ref agent "${id}"`);
@@ -870,7 +875,7 @@ describe("runCurator", () => {
     // The curator inherits the source provider route instead of requiring a
     // provider or model tied to the plugin author's environment.
     expect(opts!.config.provider).toBe(AGENT_PROVIDER);
-    expect(opts!.config.modeId).toBe("ask");
+    expect(opts!.config.modeId).toBe("read-only");
     expect(opts!.agentId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     // Source cwd and parent agent id.
     expect(opts!.cwd).toBe(AGENT_CWD);
@@ -989,11 +994,11 @@ describe("runCurator", () => {
     // Daemon snapshots carry the bare provider id and the model separately;
     // the client SDK requires the combined `provider/model` form.
     await adapter.runCurator(
-      { ...snapshot("omp", AGENT_CWD, "ai3/qwen/qwen3.8-27b") },
+      { ...snapshot("codex", AGENT_CWD, "custom/nested-model") },
       "turn-002",
       PROMPT,
     );
-    expect(createCalls[0]!.config.provider).toBe("omp/ai3/qwen/qwen3.8-27b");
+    expect(createCalls[0]!.config.provider).toBe("codex/custom/nested-model");
   });
 
   it("passes a provider that already contains a slash through unchanged", async () => {
@@ -1039,7 +1044,7 @@ describe("runCurator", () => {
       },
       providers: {
         waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
-        listModes: async () => ({ modes: [{ id: "auto-review", label: "Auto-review" }] }),
+        listModes: async () => ({ modes: [{ id: "read-only", label: "Read only" }] }),
         listModels: async () => ({ models: [{ id: "codex-default", label: "Default", isDefault: true }] }),
       },
     };
@@ -1048,17 +1053,17 @@ describe("runCurator", () => {
       subscribe: () => () => {},
     };
 
-    const adapter = new PaseoAdapter(paseo as any, settings);
+    const adapter = new PaseoAdapter(paseo, settings);
     const result = await adapter.runCurator(
-      { id: "agent-hermes", provider: "hermes/zai:glm-5.3", cwd: "/tmp" },
+      { id: "agent-source", provider: "codex/source-model", cwd: "/tmp" },
       "turn-fb",
       PROMPT,
     );
     expect(result.finalText).toBe("saved outcome");
-    expect(createCount).toBe(2); // first (hermes) fails, second (codex fallback) succeeds
+    expect(createCount).toBe(2);
   });
 
-  it("skips when no fallback provider is configured and source provider fails", async () => {
+  it("rejects an unsupported source without transmitting when no fallback is configured", async () => {
     const paseo: FakePaseoApi = {
       agents: {
         ref: () => { throw new Error("must not ref"); },
@@ -1069,39 +1074,77 @@ describe("runCurator", () => {
       read: async () => ({ status: "ready" as const, values: { fallbackProvider: undefined } }),
       subscribe: () => () => {},
     };
-    const adapter = new PaseoAdapter(paseo as any, settings);
+    const adapter = new PaseoAdapter(paseo, settings);
     const promise = adapter.runCurator(
       { id: "agent-hermes", provider: "hermes/zai:glm-5.3", cwd: "/tmp" },
       "turn-fb",
       PROMPT,
     );
-    await expect(promise).rejects.toThrow(/create-failed/);
+    await expect(promise).rejects.toThrow(/source-model-unavailable/);
   });
 
-  it("caches fallback resolution — settings read and provider discovery only run once", async () => {
-    let settingsReadCount = 0;
-    const paseo: FakePaseoApi = {
-      agents: {
-        ref: () => { throw new Error("must not ref"); },
-        create: async (options: FakeCreateOptions) => {
-          if (options.config.provider.startsWith("hermes")) throw new Error("rejected");
-          return { id: options.agentId, waitForFinish: async () => idleWaitResult("ok") };
-        },
-      },
-      providers: {
-        waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
-        listModes: async () => ({ modes: [{ id: "auto-review", label: "Auto-review" }] }),
-        listModels: async () => ({ models: [{ id: "codex-model", label: "X", isDefault: true }] }),
-      },
+  it("reads routing settings fresh after switching, clearing, invalidation and recovery", async () => {
+    const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+    paseo.providers = {
+      waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+      listModels: async () => ({ models: [{ id: "default", label: "Default", isDefault: true }] }),
+      listModes: async () => ({ modes: [{ id: "read-only", label: "Read only" }] }),
     };
-    const settings = {
-      read: async () => { settingsReadCount++; return { status: "ready" as const, values: { fallbackProvider: "codex" } }; },
-      subscribe: () => () => {},
-    };
+    let state: { status: "ready" | "invalid"; values?: { fallbackProvider?: string } } = { status: "ready", values: { fallbackProvider: "codex" } };
+    let reads = 0;
+    const adapter = new PaseoAdapter(paseo, { read: async () => { reads++; return state; } });
+    const source = { id: "source", provider: "missing", cwd: "/tmp" };
+    await adapter.runCurator(source, "one", PROMPT);
+    expect(createCalls.map(call => call.config)).toEqual([{ provider: "codex/default", modeId: "read-only" }]);
+    for (const next of [
+      { status: "ready" as const, values: { fallbackProvider: "unknown" } },
+      { status: "ready" as const, values: {} },
+      { status: "invalid" as const },
+    ]) {
+      state = next;
+      await expect(adapter.runCurator(source, "next", PROMPT)).rejects.toThrow();
+      expect(createCalls).toHaveLength(1);
+    }
+    state = { status: "ready", values: { fallbackProvider: "codex" } };
+    await adapter.runCurator(source, "restored", PROMPT);
+    expect(createCalls).toHaveLength(2);
+    expect(reads).toBeGreaterThanOrEqual(5);
+  });
 
-    const adapter = new PaseoAdapter(paseo as any, settings);
-    await adapter.runCurator({ id: "a1", provider: "hermes/zai:glm-5.3", cwd: "/tmp" }, "t1", PROMPT);
-    await adapter.runCurator({ id: "a2", provider: "hermes/zai:glm-5.3", cwd: "/tmp" }, "t2", PROMPT);
-    expect(settingsReadCount).toBe(1);
+  it("does not send if fallback is cleared while provider discovery is pending", async () => {
+    const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+    let fallbackProvider: string | undefined = "codex";
+    paseo.providers = {
+      waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+      listModes: async () => ({ modes: [{ id: "read-only", label: "Read only" }] }),
+      listModels: async () => {
+        fallbackProvider = undefined;
+        return { models: [{ id: "default", label: "Default", isDefault: true }] };
+      },
+    };
+    const adapter = new PaseoAdapter(paseo, { read: async () => ({ status: "ready", values: { fallbackProvider } }) });
+    await expect(adapter.runCurator({ id: "source", provider: "missing", cwd: "/tmp" }, "turn", PROMPT)).rejects.toThrow();
+    expect(createCalls).toHaveLength(0);
+  });
+
+  it("does not reuse an earlier model route's agent identity", async () => {
+    const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+    const adapter = new PaseoAdapter(paseo);
+    await adapter.runCurator({ id: "source", provider: "codex/model-one", cwd: "/tmp" }, "turn", PROMPT);
+    await adapter.runCurator({ id: "source", provider: "codex/model-two", cwd: "/tmp" }, "turn", PROMPT);
+    expect(createCalls[0].agentId).not.toBe(createCalls[1].agentId);
+    expect(createCalls[0].idempotencyKey).not.toBe(createCalls[1].idempotencyKey);
+  });
+
+  it.each(["auto-review", "full-access", "ask"])("fails closed for codex mode %s even with an Ask label", async (id) => {
+    const { paseo, createCalls } = makeFakeCreate({ kind: "ok", agentId: CURATOR_AGENT_ID, waitResult: idleWaitResult("ok") });
+    paseo.providers = {
+      waitForReady: async () => ({ providers: [{ id: "codex", available: true }] }),
+      listModels: async () => ({ models: [{ id: "default", label: "Default" }] }),
+      listModes: async () => ({ modes: [{ id, label: "Always Ask" }] }),
+    };
+    const adapter = new PaseoAdapter(paseo, { read: async () => ({ status: "ready", values: { fallbackProvider: "codex" } }) });
+    await expect(adapter.runCurator({ id: "source", provider: "missing", cwd: "/tmp" }, "turn", PROMPT)).rejects.toThrow();
+    expect(createCalls).toHaveLength(0);
   });
 });

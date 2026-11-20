@@ -61,7 +61,7 @@ export class FrontmatterError extends Error {
 // ===========================================================================
 
 /** SHA-256 hex digest of a UTF-8 string. */
-export function sha256(content: string): string {
+export function sha256(content: string | Uint8Array): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
@@ -472,9 +472,9 @@ function walkDir(
     } else if (lstat.isDirectory()) {
       walkDir(abs, rel, files, symlinks, hashes);
     } else if (lstat.isFile()) {
-      const content = readFileSync(abs, "utf8");
-      files.set(rel, content);
-      hashes.set(rel, sha256(content));
+      const bytes = readFileSync(abs);
+      files.set(rel, bytes.toString("utf8"));
+      hashes.set(rel, sha256(bytes));
     }
   }
 }

@@ -44,6 +44,28 @@ function clockConfig(clock: FakeClock, staleAfterMs: number): StoreConfig {
 
 describe("CuratorStore", () => {
   describe("schema and lifecycle", () => {
+    it("atomically fences terminal and rejected audits to the owning claim", () => {
+      const clock = new FakeClock(Date.parse("2040-01-01"));
+      const store = new CuratorStore(":memory:", clockConfig(clock, 100));
+      const row = store.enqueue("agent", "turn")!;
+      const stale = store.claim(row.id)!;
+      clock.advance(101);
+      store.recoverStaleRunning();
+      const current = store.claim(row.id)!;
+      const audit = { queueId: row.id, sourceAgentId: "agent", turnId: "turn",
+        outcome: "nothing_to_save" as const, summary: "nothing to save", operationCount: 0,
+        operationsHash: "a".repeat(64), skillNames: [] };
+      expect(store.completeWithAudit(row.id, "nothing_to_save", stale.attempts, audit)).toBe(false);
+      expect(store.recordAuditIfClaimCurrent(row.id, stale.attempts, { ...audit, outcome: "rejected", rejectionReason: "stale" })).toBe(false);
+      expect(store.listAudit()).toEqual([]);
+      expect(() => store.completeWithAudit(row.id, "nothing_to_save", current.attempts, { ...audit, operationsHash: "invalid" })).toThrow();
+      expect(store.isClaimCurrent(row.id, current.attempts)).toBe(true);
+      expect(store.listAudit()).toEqual([]);
+      expect(store.completeWithAudit(row.id, "nothing_to_save", current.attempts, audit)).toBe(true);
+      expect(store.get("agent", "turn")?.status).toBe("nothing_to_save");
+      expect(store.listAudit().map(a => a.outcome)).toEqual(["nothing_to_save"]);
+      store.close();
+    });
     it("migrates legacy audit rows and backfills observed queued turns", () => {
       const dbPath = `${process.env.TMPDIR ?? "/tmp"}/curator-legacy-${Date.now()}-${Math.random()}.sqlite`;
       const legacy = new DatabaseSync(dbPath);
@@ -70,9 +92,76 @@ describe("CuratorStore", () => {
       expect(store.hasObservedTurn("agent-old", "turn-old")).toBe(true);
       expect(store.recordIteration("agent-old", 5, "turn-old")).toBe(true);
       expect(store.getCounter("agent-old")).toBe(0);
-      expect(store.listAudit().map((row) => row.outcome).sort()).toEqual(["applied", "rejected"]);
+      expect(store.listAudit().map((row) => row.outcome).sort()).toEqual(["nothing_to_save", "rejected"]);
       store.close();
       rmSync(dbPath, { force: true });
+    });
+
+    it("persists exact audit outcomes and queue no-op success across real SQLite reopens", () => {
+      const dbPath = `/tmp/curator-audit-${Date.now()}-${Math.random()}.sqlite`;
+      let store = new CuratorStore(dbPath);
+      try {
+        const row = store.enqueue("agent", "turn")!;
+        const claim = store.claim(row.id)!;
+        for (const outcome of ["applied", "rejected", "nothing_to_save"] as const) {
+          const audit = {
+            queueId: row.id, sourceAgentId: "agent", turnId: "turn", outcome,
+            ...(outcome === "rejected" ? { rejectionReason: "bounded rejection" } : {}),
+            summary: "bounded", operationCount: 0, operationsHash: "a".repeat(64), skillNames: [],
+          };
+          store.recordAudit(audit);
+          store.recordAudit(audit);
+        }
+        store.complete(row.id, "nothing_to_save", claim.attempts);
+        expect(store.listAudit().map(row => row.outcome)).toEqual(["applied", "rejected", "nothing_to_save"]);
+        for (let i = 0; i < 2; i++) {
+          store.close();
+          store = new CuratorStore(dbPath);
+          expect(store.get("agent", "turn")?.status).toBe("nothing_to_save");
+          expect(store.listAudit().map(row => row.outcome)).toEqual(["applied", "rejected", "nothing_to_save"]);
+        }
+      } finally {
+        store.close();
+        rmSync(dbPath, { force: true });
+      }
+    });
+
+    it("upgrades restrictive legacy queue and audit CHECK constraints without losing identities", () => {
+      const dbPath = `/tmp/curator-constrained-${Date.now()}-${Math.random()}.sqlite`;
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE queue (
+          id TEXT PRIMARY KEY, source_agent_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','running','applied','failed')),
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, attempts INTEGER NOT NULL,
+          started_at TEXT, completed_at TEXT, error TEXT, UNIQUE(source_agent_id,turn_id)
+        );
+        INSERT INTO queue VALUES ('q-old','agent','turn','pending','2040-01-01','2040-01-01',0,NULL,NULL,NULL);
+        CREATE TABLE audit_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, queue_id TEXT NOT NULL,
+          outcome TEXT NOT NULL CHECK(outcome IN ('applied','rejected')),
+          skill_names_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        INSERT INTO audit_log VALUES (17,'q-before','applied','[]','2040-01-01');
+        CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations VALUES (1,'2040-01-01');
+      `);
+      legacy.close();
+      let store = new CuratorStore(dbPath);
+      try {
+        const claim = store.claim("q-old")!;
+        expect(store.complete(claim.id, "nothing_to_save", claim.attempts)).toBe(true);
+        store.recordAudit({ queueId: claim.id, sourceAgentId: "agent", turnId: "turn",
+          outcome: "nothing_to_save", summary: "no lesson", operationCount: 0,
+          operationsHash: "a".repeat(64), skillNames: [] });
+        store.close();
+        store = new CuratorStore(dbPath);
+        expect(store.get("agent", "turn")).toMatchObject({ id: "q-old", status: "nothing_to_save", attempts: 1 });
+        expect(store.listAudit().map(row => [row.id, row.outcome])).toEqual([["17", "applied"], ["18", "nothing_to_save"]]);
+      } finally {
+        store.close();
+        rmSync(dbPath, { force: true });
+      }
     });
 
     it("accepts an explicit database path (including :memory:)", () => {

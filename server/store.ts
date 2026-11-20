@@ -81,7 +81,7 @@ export class CuratorStore {
     this.staleAfterMs = config?.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
-    this.migrate();
+    this.tx(() => this.migrate());
   }
 
   /** Close the underlying database. */
@@ -194,21 +194,51 @@ export class CuratorStore {
     addAuditColumn("operations_hash", `TEXT NOT NULL DEFAULT '${"0".repeat(64)}'`);
     addAuditColumn("rejection_reason", "TEXT");
 
+    if (!this.db.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get()) {
+      this.db.exec(`
+        CREATE TABLE queue_v2 (
+          id TEXT PRIMARY KEY, source_agent_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending','running','applied','nothing_to_save','failed')),
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0, started_at TEXT, completed_at TEXT, error TEXT,
+          UNIQUE (source_agent_id, turn_id)
+        );
+        INSERT INTO queue_v2
+          SELECT id, source_agent_id, turn_id, status, created_at, updated_at,
+                 attempts, started_at, completed_at, error FROM queue ORDER BY rowid;
+        DROP TABLE queue;
+        ALTER TABLE queue_v2 RENAME TO queue;
+        CREATE TABLE audit_log_v2 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          queue_id TEXT NOT NULL,
+          source_agent_id TEXT NOT NULL,
+          turn_id TEXT NOT NULL,
+          outcome TEXT NOT NULL CHECK (outcome IN ('applied','rejected','nothing_to_save')),
+          summary TEXT NOT NULL,
+          operation_count INTEGER NOT NULL,
+          operations_hash TEXT NOT NULL,
+          skill_names_json TEXT NOT NULL,
+          rejection_reason TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO audit_log_v2
+          SELECT MIN(id), queue_id, source_agent_id, turn_id,
+                 CASE WHEN outcome IN ('applied','nothing_to_save') THEN outcome ELSE 'rejected' END,
+                 summary, operation_count, operations_hash, skill_names_json,
+                 CASE WHEN outcome IN ('applied','nothing_to_save') THEN NULL
+                      ELSE COALESCE(rejection_reason, 'legacy audit outcome') END,
+                 created_at
+          FROM audit_log
+          GROUP BY queue_id, CASE WHEN outcome IN ('applied','nothing_to_save') THEN outcome ELSE 'rejected' END;
+        DROP TABLE audit_log;
+        ALTER TABLE audit_log_v2 RENAME TO audit_log;
+        CREATE UNIQUE INDEX audit_log_terminal_outcome ON audit_log(queue_id, outcome);
+        INSERT INTO schema_migrations (version, applied_at) VALUES (2, '${new Date().toISOString()}');
+      `);
+    }
     this.db.exec(`
       INSERT OR IGNORE INTO observed_turns (source_agent_id, turn_id, observed_at)
         SELECT source_agent_id, turn_id, updated_at FROM queue;
-
-      DROP INDEX IF EXISTS audit_log_terminal_outcome;
-      UPDATE audit_log SET outcome = 'applied' WHERE outcome = 'nothing_to_save';
-      UPDATE audit_log
-        SET outcome = 'rejected',
-            rejection_reason = COALESCE(rejection_reason, 'legacy audit outcome')
-        WHERE outcome NOT IN ('applied', 'rejected');
-      DELETE FROM audit_log
-        WHERE id NOT IN (
-          SELECT MIN(id) FROM audit_log GROUP BY queue_id, outcome
-        );
-      CREATE UNIQUE INDEX audit_log_terminal_outcome ON audit_log(queue_id, outcome);
     `);
 
     this.db
@@ -284,15 +314,25 @@ export class CuratorStore {
       skillNames: [...new Set(input.skillNames)].sort(),
     });
     this.db.prepare(
-      `INSERT OR IGNORE INTO audit_log
+      `INSERT INTO audit_log
        (queue_id, source_agent_id, turn_id, outcome, summary, operation_count,
         operations_hash, skill_names_json, rejection_reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(queue_id, outcome) DO NOTHING`,
     ).run(
       record.queueId, record.sourceAgentId, record.turnId, record.outcome,
       record.summary, record.operationCount, record.operationsHash,
       JSON.stringify(record.skillNames), record.rejectionReason ?? null, record.timestamp,
     );
+  }
+
+  /** Record an attempt failure only while that attempt still owns the row. */
+  recordAuditIfClaimCurrent(id: string, claimAttempt: number, input: AuditInput): boolean {
+    return this.tx(() => {
+      if (input.queueId !== id || !this.isClaimCurrent(id, claimAttempt)) return false;
+      this.recordAudit(input);
+      return true;
+    });
   }
 
   listAudit(): AuditRecord[] {
@@ -302,7 +342,7 @@ export class CuratorStore {
               rejection_reason, created_at FROM audit_log ORDER BY id ASC`,
     ).all() as Array<{
       id: number; queue_id: string; source_agent_id: string; turn_id: string;
-      outcome: "applied" | "rejected"; summary: string; operation_count: number;
+      outcome: AuditRecord["outcome"]; summary: string; operation_count: number;
       operations_hash: string; skill_names_json: string;
       rejection_reason: string | null; created_at: string;
     }>;
@@ -480,17 +520,29 @@ export class CuratorStore {
    * `nothing_to_save`). Idempotent: a row that is not `running` is left alone.
    */
   complete(id: string, outcome: "applied" | "nothing_to_save", claimAttempt: number): boolean {
+    return this.tx(() => this.completeClaim(id, outcome, claimAttempt));
+  }
+
+  /** Commit a terminal outcome and its audit together, fenced by the claim. */
+  completeWithAudit(id: string, outcome: "applied" | "nothing_to_save", claimAttempt: number, audit: AuditInput): boolean {
+    if (audit.queueId !== id || audit.outcome !== outcome) throw new Error("audit does not match completion");
     return this.tx(() => {
-      const now = this.now().toISOString();
-      const result = this.db
-        .prepare(
-          `UPDATE queue
-             SET status = ?, updated_at = ?, completed_at = ?, error = NULL
-           WHERE id = ? AND status = 'running' AND attempts = ?`,
-        )
-        .run(outcome, now, now, id, claimAttempt);
-      return result.changes === 1;
+      if (!this.completeClaim(id, outcome, claimAttempt)) return false;
+      this.recordAudit(audit);
+      return true;
     });
+  }
+
+  private completeClaim(id: string, outcome: "applied" | "nothing_to_save", claimAttempt: number): boolean {
+    const now = this.now().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE queue
+           SET status = ?, updated_at = ?, completed_at = ?, error = NULL
+         WHERE id = ? AND status = 'running' AND attempts = ?`,
+      )
+      .run(outcome, now, now, id, claimAttempt);
+    return result.changes === 1;
   }
 
   /**

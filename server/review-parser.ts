@@ -51,12 +51,7 @@ const parsedDocSchema = z
     summary: z.string().min(1),
     outcome: ReviewOutcomeSchema,
     operations: z.array(SkillOperationSchema).max(MAX_OPERATIONS),
-    // Advisory only. Accept any array value (strings, objects, mixed) so a
-    // model that adapts by listing skill URIs as strings rather than full
-    // ReadSetEntry objects does not cause a schema rejection. Non-object
-    // entries and self-inconsistent entries are silently dropped before the
-    // result is returned; the locked filesystem snapshot in SkillManager is
-    // the authoritative read-before-write proof.
+    // Legacy evidence is advisory; freshness comes from plugin-owned pre-review versions.
     readSet: z.array(z.unknown()).optional(),
   })
   .strict();
@@ -282,11 +277,7 @@ export function parseReviewResult(
     return null;
   }
 
-  // Read-set is advisory: drop non-object entries (a model that adapts to the
-  // "don't supply hashes" prompt by listing skill URIs as strings is still
-  // valid), then drop entries whose hash does not match their own content.
-  // The locked filesystem snapshot in SkillManager is the authoritative
-  // read-before-write proof; nothing here affects write safety.
+  // Retain only self-consistent legacy entries; the model does not establish freshness.
   const readSet = (result.data.readSet ?? []).flatMap((raw) => {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
     const parsed = readSetEntrySchema.safeParse(raw);
