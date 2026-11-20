@@ -277,16 +277,19 @@ export class PaseoAdapter {
 
   /**
    * Discover a fallback provider/model to use when the source agent's
-   * provider cannot create a daemon-side curator agent. Prefers `omp` with
-   * `ask` mode (the only provider+mode combination verified to work for
-   * curator use). Returns null when no suitable provider is found, and caches
-   * the result so discovery only runs once per adapter lifetime.
+   * provider cannot create a daemon-side curator agent. Queries all available
+   * providers dynamically — no provider names are hardcoded. Prefers a mode
+   * whose label contains "ask" (case-insensitive) as a heuristic for the most
+   * restricted available mode; falls back to the provider's default mode when
+   * no ask-labelled mode exists. The plugin-owned permission guard provides
+   * the real write-safety enforcement regardless of mode. Caches the result so
+   * discovery only runs once per adapter lifetime.
    */
-  private async discoverFallbackProvider(): Promise<{ providerSelection: string; modeId: string } | null> {
+  private async discoverFallbackProvider(): Promise<{ providerSelection: string; modeId: string | undefined } | null> {
     if (this.fallbackProviderSelection !== undefined) {
-      return this.fallbackProviderSelection === null
-        ? null
-        : { providerSelection: this.fallbackProviderSelection, modeId: "ask" };
+      if (this.fallbackProviderSelection === null) return null;
+      const [providerSelection, modeId] = this.fallbackProviderSelection.split("|");
+      return { providerSelection: providerSelection!, modeId: modeId || undefined };
     }
 
     if (!this.paseo.providers) {
@@ -295,29 +298,38 @@ export class PaseoAdapter {
     }
 
     try {
-      // Preference: omp with ask mode — the only combination we have verified
-      // works for background curator agents in production.
-      const PREFERRED: Array<{ provider: string; modeId: string }> = [
-        { provider: "omp", modeId: "ask" },
-      ];
-
       const snap = await this.paseo.providers.waitForReady({ timeoutMs: 10_000 });
-      const availableIds = new Set(
-        snap.providers.filter(p => p.available).map(p => p.id),
-      );
+      const available = snap.providers.filter(p => p.available);
 
-      for (const { provider, modeId } of PREFERRED) {
-        if (!availableIds.has(provider)) continue;
+      // Prefer claude and codex (GPT) first; fall through to any other
+      // available provider. No model IDs are hardcoded — listModels picks
+      // the provider's own default.
+      const PREFERRED_FIRST = ["claude", "codex"];
+      const sorted = [
+        ...PREFERRED_FIRST.map(id => available.find(p => p.id === id)).filter(Boolean),
+        ...available.filter(p => !PREFERRED_FIRST.includes(p.id)),
+      ] as typeof available;
+
+      for (const p of sorted) {
         try {
-          const models = await this.paseo.providers.listModels(provider);
+          const models = await this.paseo.providers.listModels(p.id);
           const model =
             models.models.find(m => m.isDefault)?.id ?? models.models[0]?.id;
           if (!model) continue;
-          const selection = `${provider}/${model}`;
-          this.fallbackProviderSelection = selection;
+
+          // Prefer a mode with "ask" in its label (provider-agnostic heuristic
+          // for the most restricted available mode).
+          const modes = await this.paseo.providers.listModes(p.id);
+          const askMode = modes.modes.find(m =>
+            m.label.toLowerCase().includes("ask"),
+          );
+          const modeId = askMode?.id;
+
+          const selection = `${p.id}/${model}`;
+          this.fallbackProviderSelection = `${selection}|${modeId ?? ""}`;
           return { providerSelection: selection, modeId };
         } catch {
-          // provider listed as available but listModels failed — skip it
+          // This provider is unavailable or can't list models/modes — try next.
         }
       }
     } catch {

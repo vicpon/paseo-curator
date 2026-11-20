@@ -1028,7 +1028,6 @@ describe("runCurator", () => {
 
   it("falls back to discovered omp/model when source provider create fails", async () => {
     let createCount = 0;
-    const FALLBACK_MODEL = "omp/fallback-model-123";
     const paseo: FakePaseoApi = {
       agents: {
         ref: () => { throw new Error("must not ref"); },
@@ -1042,9 +1041,12 @@ describe("runCurator", () => {
         },
       },
       providers: {
-        waitForReady: async () => ({ providers: [{ id: "omp", available: true }] }),
-        listModes: async () => ({ modes: [{ id: "ask", label: "Always Ask" }] }),
-        listModels: async () => ({ models: [{ id: "fallback-model-123", label: "Fallback", isDefault: true }] }),
+        waitForReady: async () => ({ providers: [
+          { id: "claude", available: true },
+          { id: "codex", available: true },
+        ] }),
+        listModes: async () => ({ modes: [{ id: "plan", label: "Plan Mode (Always Ask)" }] }),
+        listModels: async (provider: string) => ({ models: [{ id: `${provider}-default-model`, label: "Default", isDefault: true }] }),
       },
     };
 
@@ -1055,6 +1057,7 @@ describe("runCurator", () => {
       PROMPT,
     );
     expect(result.finalText).toBe("saved outcome");
+    // First attempt (hermes) fails, second (claude — first preferred) succeeds
     expect(createCount).toBe(2);
   });
 
@@ -1069,9 +1072,9 @@ describe("runCurator", () => {
         },
       },
       providers: {
-        waitForReady: async () => { discoveryCalls++; return { providers: [{ id: "omp", available: true }] }; },
-        listModes: async () => ({ modes: [{ id: "ask", label: "Always Ask" }] }),
-        listModels: async () => ({ models: [{ id: "model-x", label: "X", isDefault: true }] }),
+        waitForReady: async () => { discoveryCalls++; return { providers: [{ id: "claude", available: true }] }; },
+        listModes: async () => ({ modes: [{ id: "plan", label: "Plan Mode (Always Ask)" }] }),
+        listModels: async () => ({ models: [{ id: "claude-model-x", label: "X", isDefault: true }] }),
       },
     };
 
