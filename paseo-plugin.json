@@ -1,6 +1,7 @@
 {
   "id": "curator",
   "name": "Curator",
+  "icon": "assets/icon.png",
   "description": "Automatic guarded skill learning from completed Paseo turns",
   "media": [],
   "build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]],

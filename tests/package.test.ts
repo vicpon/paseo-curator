@@ -1,4 +1,6 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -177,6 +179,34 @@ describe("production runtime dependencies", () => {
 });
 
 describe("Paseo host compatibility", () => {
+  it("ships the manifest icon and a safe self-contained SVG source", () => {
+    const manifest = JSON.parse(readFileSync(resolve(root, "paseo-plugin.json"), "utf8"));
+    // Paseo's manifest accepts PNG; retain the editable vector beside it.
+    expect(manifest.icon).toBe("assets/icon.png");
+    const sourcePath = "assets/icon.svg";
+    for (const file of [manifest.icon, sourcePath]) {
+      expect(existsSync(resolve(root, file)), `${file} must exist`).toBe(true);
+    }
+    const svg = readFileSync(resolve(root, sourcePath), "utf8");
+    expect(svg).not.toMatch(/<\?|<!|&/);
+    const document = new DOMParser().parseFromString(svg, "image/svg+xml");
+    expect(document.querySelector("parsererror")).toBeNull();
+    expect(document.documentElement.localName).toBe("svg");
+    expect(document.documentElement.namespaceURI).toBe("http://www.w3.org/2000/svg");
+    for (const element of Array.from(document.querySelectorAll("*"))) {
+      expect(["svg", "rect", "path"]).toContain(element.localName);
+      for (const attribute of Array.from(element.attributes)) {
+        expect(["xmlns", "viewBox", "width", "height", "x", "y", "rx", "d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin"]).toContain(attribute.name);
+        if (attribute.name !== "xmlns") expect(attribute.value).not.toMatch(/url\s*\(|:|\/\//i);
+      }
+    }
+    const png = readFileSync(resolve(root, manifest.icon));
+    expect(png.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+    const [packed] = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" }));
+    const shipped = packed.files.map((file: { path: string }) => file.path);
+    expect(shipped).toEqual(expect.arrayContaining(["paseo-plugin.json", manifest.icon, sourcePath]));
+  });
+
   it("keeps every server-entry relative dependency under server/ or shared/", () => {
     const entry = resolve(root, "index.server.ts");
     const invalid: string[] = [];
