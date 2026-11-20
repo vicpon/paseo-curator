@@ -2,7 +2,7 @@
   "name": "curator",
   "private": true,
   "version": "0.1.0",
-  "description": "Daemon-side automatic skill learning for Paseo",
+  "description": "Automatically turns lessons from completed Paseo work into reusable skills for future agents.",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -12,6 +12,8 @@
     "OVERVIEW.md",
     "OVERVIEW.*.md",
     "docs/routing.md",
+    "docs/listing.md",
+    "docs/screenshots/README.md",
     "index.client.tsx",
     "index.server.ts",
     "client/",
@@ -26,7 +28,7 @@
     "preview:settings": "vite --config tests/ui/vite.config.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@getpaseo/protocol": "0.16.0-beta.2",

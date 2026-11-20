@@ -2,7 +2,7 @@
 
 Paseo agents often solve the same problems more than once: a brittle test command, an API quirk, a deployment check, or a debugging sequence that took several attempts to get right. Paseo Curator turns those verified lessons into reusable skills under `~/.agents/skills/`, where future agents can find them instead of rediscovering the same fix in a new session.
 
-It brings Hermes-style automatic skill learning to the Paseo daemon, so learning is not tied to one foreground agent or session. It does **not** create a new skill after every turn. The plugin waits until a source agent has accumulated 10 tool calls, then reviews the completed turn for a lesson that is both reusable and proven to work. A review that finds no durable lesson ends with `nothing_to_save`. When there is something worth keeping, the curator prefers to update a relevant existing skill and creates a new one only when no existing skill fits.
+It brings Hermes-style automatic skill learning to the Paseo daemon, so learning is not tied to one foreground agent or session. It does **not** create a new skill after every turn. The plugin waits until a source agent has accumulated 10 unique tool calls across completed turns, then reviews the completed turn for a lesson that is both reusable and proven to work. A review that finds no durable lesson ends with `nothing_to_save`. When there is something worth keeping, the curator prefers to update a relevant existing skill and creates a new one only when no existing skill fits.
 
 For example, it can preserve:
 
@@ -15,10 +15,21 @@ The curator returns structured proposals such as "create this skill," "replace t
 
 ## Requirements
 
-- Paseo `0.16.0-beta.2` or later
-- Node.js 22 or later (`node:sqlite`)
+- Paseo daemon and app with the APIs used by SDK `0.16.0-beta.2`; manifest range `>=0.16.0-beta.2`. Future breaking releases are not guaranteed compatible. Native screenshots were checked on Linux with `0.17.0-beta.1`; macOS and Windows were not checked.
+- Node.js **22.13.0 or later** (`node:sqlite` without an experimental flag), plus npm on the daemon PATH for Git preparation.
+- An enabled, ready provider with working credentials, selected-model access and its required CLI/runtime. Each background review consumes provider quota and may incur usage costs. Readiness alone does not verify account/model access.
 
 Reviews preserve the exact source provider/model when available. All enabled, ready providers from the live host SDK catalog can be selected, including custom families. The reviewer uses the provider's normal tool permissions and can execute native tools, including file writes and commands. Curator does not confine the reviewer or enforce read-only execution. The prompt's no-write guidance is an instruction, not an enforced boundary. See [routing behavior and verification](docs/routing.md).
+
+## Native screenshots
+
+These are real Paseo `0.17.0-beta.1` Linux captures of Curator's current settings, cropped to the plugin. The expanded menu has a marked redaction over local installation details. No project prompts, transcripts or credentials are included. The saved Claude/Haiku choice is an example of existing settings, not a requirement or the default.
+
+![Curator routing fields with an optional model selection](assets/native-routing-settings.png)
+
+![Enabled provider choices in the native Paseo dropdown](assets/native-routing-providers.png)
+
+See [screenshot provenance and missing activity evidence](docs/screenshots/README.md) and the concise [public listing overview](OVERVIEW.md).
 
 ## Install
 
@@ -68,11 +79,11 @@ paseo plugin reload curator
 paseo plugin ls curator --json
 ```
 
-The plugin runs its learning pipeline on the server and adds a small client renderer for curator activity cards. Paseo plugins are trusted and unsandboxed. Review the code before installing it: this plugin is intentionally allowed to update the configured skill library.
+The plugin runs its learning pipeline on the server and adds a compact timeline activity line. Paseo plugins are trusted and unsandboxed. Review the code before installing it: this plugin is intentionally allowed to update the configured skill library.
 
 ## Configuration
 
-In Settings → Plugins → Curator, **Review provider** offers all enabled, ready providers from the host's catalog. **None** (default) disables fallback. Selecting a provider explicitly authorizes transmission to that provider when the exact source route cannot run. **Review model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both saved selections without saving. Host-disabled and unavailable providers are hidden, including their model controls. A saved inactive choice uses a generic placeholder without substitution.
+In Settings → Plugins → Curator, **Review provider** offers all enabled, ready providers from the host's catalog. **None** (default) disables fallback, not reviews on the source route. Selecting a provider explicitly authorizes transmission to that provider when the exact source route cannot run. **Review model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both saved selections without saving. Host-disabled and unavailable providers are hidden, including their model controls. A saved inactive choice uses a generic placeholder without substitution.
 
 Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum or family eligibility policy.
 
@@ -82,7 +93,7 @@ Other values remain built in:
 |---|---:|
 | Skill root | `~/.agents/skills/` |
 | State database | `~/.paseo/plugins/curator/curator.sqlite` |
-| Review cadence | 10 unique tool iterations |
+| Review cadence | 10 unique tool calls across completed turns |
 | Curator provider | Exact source route when available; explicit fallback only |
 | Reviewer tool permissions | Provider normal/default configuration; native tools can execute |
 | Curator concurrency | 1 |
@@ -100,9 +111,9 @@ Durable state includes cadence counters, queue claims and retries, reconciliatio
 
 ## What is sent to providers
 
-The curator prompt contains a bounded excerpt of one completed source turn plus an index of the shared skill library. It can include user and assistant messages, reasoning, tool calls and output, file contents, credentials, secrets, and personal information already present in that turn. The size bounds do not redact sensitive data, and there is no no-credentials or no-file-contents guarantee.
+The curator prompt contains a bounded excerpt of one completed source turn plus an index of the shared skill library containing names, descriptions and SKILL.md hashes. It can include user and assistant messages, reasoning, tool calls and output, file contents, credentials, secrets, and personal information already present in that turn. The size bounds do not redact sensitive data, and there is no no-credentials or no-file-contents guarantee.
 
-For OpenCode only, the plugin also sends exact captured skill-file text, bounded to 120,000 serialized characters. Hidden paths and common binary indicators are omitted; this is not secret detection or redaction. Existing Codex/Claude routes do not receive this extra bundle.
+For OpenCode only, the plugin also sends exact captured skill-file text, bounded to 120,000 serialized characters. Hidden paths and common binary indicators are omitted; this is not secret detection or redaction. Other routes do not receive this extra bundle.
 
 The background agent runs in the source workspace. Native tools can read or change workspace and skill files and execute commands, subject to that provider's normal permissions. Tool results can be sent to the selected provider too. The provider configured for the selected route receives the prompt and tool results under its own data policy and your account settings. The plugin is trusted, unsandboxed daemon code with the daemon user's filesystem and network access.
 
@@ -116,7 +127,7 @@ The background agent runs in the source workspace. Native tools can read or chan
 
 ## What you see in Paseo
 
-The curator stays quiet when a review finds nothing reusable. It does not add a “no reusable lesson found” message to your timeline.
+The curator stays quiet when a review finds nothing reusable. It does not add a “no reusable lesson found” message to your timeline. Timeline notices do not survive a daemon restart; audit outcomes remain in SQLite.
 
 When a review makes a real change, a single muted subtext line appears in the source agent's timeline — **Self-improvement review — updated \<skills\>** — listing the affected skill names (and change count when more than one). If a review exhausts its retries or reaches a terminal safety failure, a compact danger-colored line — **Curator review failed** — appears instead. These notices are appended only after the durable queue state has been updated; notification failure cannot change the review outcome.
 
@@ -158,7 +169,7 @@ A successful review ends with queue status `nothing_to_save` or `applied`. An `a
 
 ## Safety and recovery
 
-- Curator output is untrusted JSON. The plugin validates proposed mutations; the reviewing agent can execute native tools under the provider's normal permissions. These validation checks apply to structured proposals, not direct native tool actions.
+- Curator output is untrusted JSON. Validation applies only to plugin-applied structured operations; the reviewing agent can execute native tools under the provider's normal permissions. These validation checks apply to structured proposals, not direct native tool actions.
 - The plugin captures byte-exact skill versions before review, then compares touched skills under its locks before any mutation, including `remove_file`. Model-supplied read sets are advisory; the model need not echo files or compute hashes. Changes after capture reject the batch. These locks coordinate plugin batches, not arbitrary external editors.
 - Paths are contained within the canonical skill root; symlink swaps are checked again at mutation and rollback time.
 - Batches use stable locks, snapshots, atomic file writes, and rollback.
@@ -168,7 +179,7 @@ A successful review ends with queue status `nothing_to_save` or `applied`. An `a
 - Curator agents are excluded from their own lifecycle. Agent IDs include the route and queue attempt. A retry starts a fresh review against its new pre-review capture; it cannot reattach to output based on an earlier capture. Curator adds no permission-denial hook and does not alter ordinary source-agent permissions.
 - Source-turn entries and skill-index descriptions are explicitly delimited as untrusted data; curator agents are instructed never to execute quoted commands or tasks.
 - Automatic maintenance archives only skills whose frontmatter says `created_by: paseo-curator`. User and externally installed skills are protected from archival, but reviews can patch them or remove their support files.
-- Prompts, transcripts, raw model output, secrets, and PII are not persisted in errors or audit records.
+- Errors and audits use fixed summaries and bounded failure categories rather than raw transcripts or model output. Audits include source identifiers, skill names, operation counts and hashes. This does not control Paseo or provider retention of agent history, or prevent sensitive content being present in generated skill files.
 
 Provider eligibility and native confinement checks were removed at the user's explicit request. Registry reviewers may reject this safety posture. The structured operation safeguards do not prevent a reviewer from changing files directly through native tools. Existing rollback snapshots store UTF-8 text, so rollback restoration of binary assets is not byte-preserving; version checks compare raw bytes.
 
