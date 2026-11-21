@@ -321,6 +321,7 @@ it("does not register a permission policy for curator or ordinary source agents"
   const cleanup = serverModule.default({
     registerSettings: () => ({}),
     on: (event: string) => { events.push(event); return () => {}; },
+    before: () => () => {},
     addHook: () => () => {},
   } as unknown as PluginServerContext);
   expect(events).not.toContain("agent.permission_requested");

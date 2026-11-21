@@ -7,7 +7,8 @@ import {
 } from "./paseo-adapter";
 import type { SkillSummary } from "./review-prompt";
 import { buildReviewPrompt } from "./review-prompt";
-import { parseReviewResult, type ReadSetEntry } from "./review-parser";
+import type { ReadSetEntry } from "./skill-manager";
+import { MAX_SUBMISSIONS, REVIEW_TIMEOUT_MS, managerFeedback, submissionError, validateSubmission, type SubmissionHandler } from "./review-submission";
 import type { QueueRecord, SkillOperation } from "./contracts";
 import type { AuditInput } from "./store";
 import type { ReviewSnapshot } from "./skill-manager";
@@ -56,7 +57,7 @@ interface QueueStoreLike {
 /** The bounded timeline/curator adapter surface the orchestrator consumes. */
 interface AdapterLike {
   readWholeTurn(agent: SourceAgent, turnId: string): Promise<WholeTurnRead>;
-  runCurator(agent: SourceAgent, turnId: string, prompt: string, reviewId?: string, skillFiles?: Array<{ skillName: string; path: string; content: string }>): Promise<{
+  runCurator(agent: SourceAgent, turnId: string, prompt: string, reviewId?: string, skillFiles?: Array<{ skillName: string; path: string; content: string }>, submit?: SubmissionHandler): Promise<{
     curatorAgentId: string;
     finalText: string;
   }>;
@@ -82,6 +83,7 @@ interface SkillManagerLike {
       turnId: string;
       claimIsCurrent?: () => boolean;
       reviewSnapshot?: ReviewSnapshot;
+      authorized?: () => Promise<boolean>;
     },
   ): Promise<
     { outcome: "applied" | "rejected" | "rolled_back" | "rollback_failed" }
@@ -147,8 +149,8 @@ export interface TurnHandledResult {
  *
  * - `processPending` (the drain): single-flight. Concurrent callers share one
  *   drain; the drain claims the oldest pending row (FIFO), re-reads the exact
- *   turn, builds the review prompt, runs the curator, parses the strict
- *   result, applies operations through the skill manager, and transitions the
+ *   turn, builds the review prompt, runs the curator with a structured submission tool,
+ *   applies accepted operations through the skill manager, and transitions the
  *   row to a terminal state. It loops until no pending rows remain.
  *
  * - `shutdown`: prevents further scheduling and waits for the active drain.
@@ -312,8 +314,8 @@ export class CuratorOrchestrator {
    * Claim and process rows one at a time, FIFO, until the queue is empty.
    *
    * Every step is content-safe: a turn read failure and a curator failure
-   * are bounded to identity + safe category, and an unparseable curator
-   * result is a structured parse failure — none of them can carry transcript
+   * are bounded to identity + safe category, and an missing curator
+   * submission is an explicit failure — none of them can carry transcript
    * or model output into the stored error.
    *
    * A failed attempt that is re-queued (`pending`) is claimed immediately in
@@ -356,47 +358,7 @@ export class CuratorOrchestrator {
         sourceAgentId: row.sourceAgentId,
         turnId: row.turnId,
       };
-      const reconciliation = await this.skillManager.reconcileBatch(context);
-      if (reconciliation.outcome === "applied") {
-        const completed = this.store.completeWithAudit(row.id, "applied", row.attempts, {
-          ...context,
-          outcome: "applied",
-          summary: "reconciled applied batch",
-          operationCount: reconciliation.operationCount,
-          operationsHash: reconciliation.operationsHash,
-          skillNames: reconciliation.skillNames,
-        });
-        if (completed) {
-          await this.notifyBestEffort({
-            outcome: "applied",
-            sourceAgentId: row.sourceAgentId,
-            turnId: row.turnId,
-            operationCount: reconciliation.operationCount,
-            skillNames: reconciliation.skillNames,
-          });
-        }
-        return "failed";
-      }
-      if (reconciliation.outcome === "reconciliation_required") {
-        this.store.recordAuditIfClaimCurrent(row.id, row.attempts, {
-          ...context,
-          outcome: "rejected",
-          summary: "filesystem reconciliation required",
-          operationCount: reconciliation.operationCount ?? 0,
-          operationsHash: reconciliation.operationsHash ?? hashOperations([]),
-          skillNames: reconciliation.skillNames ?? [],
-          rejectionReason: "filesystem reconciliation required",
-        });
-        const failed = this.store.fail(row.id, "filesystem reconciliation required", row.attempts);
-        if (failed) {
-          await this.notifyBestEffort({
-            outcome: "failed",
-            sourceAgentId: row.sourceAgentId,
-            turnId: row.turnId,
-          });
-        }
-        return "failed";
-      }
+      if (await this.reconcileRow(row)) return "failed";
 
       // Re-read the exact turn (the claim does not carry a snapshot).
       const read = await this.adapter.readWholeTurn(agent, row.turnId);
@@ -422,103 +384,96 @@ export class CuratorOrchestrator {
         skills,
       }).prompt;
 
-      // Run the curator and parse its strict, content-validated result.
-      const result = await this.adapter.runCurator(rereadAgent, row.turnId, prompt, `${row.id}:${row.attempts}`, this.skillManager.reviewSkillFiles(reviewSnapshot));
-      const parsed = parseReviewResult(result.finalText);
-
-      if (parsed === null) {
-        // The parser records a structured, secret-safe reason; it never
-        // echoes the model output.
-        return this.retryOrFailAndNotify(row, "invalid curator output");
-      }
-
-      if (parsed.outcome === "nothing_to_save") {
-        // A valid nothing verdict must carry no mutations; the schema does
-        // not guarantee that, so verify before terminating without a batch.
-        if (parsed.operations.length !== 0) {
-          return this.retryOrFailAndNotify(row, "invalid curator output");
-        }
-        this.store.completeWithAudit(row.id, "nothing_to_save", row.attempts, {
-          ...context,
-          outcome: "nothing_to_save",
-          summary: "nothing to save",
-          operationCount: 0,
-          operationsHash: hashOperations([]),
-          skillNames: [],
-        });
-        return "failed";
-      }
-
-      // Apply the batch with the row's exact identity. Only an `applied`
-      // outcome marks the review applied; every other outcome (rejected,
-      // rolled back, rollback failed) is a failed review.
-      const applyResult = await this.skillManager.applyBatch(
-        parsed.operations,
-        parsed.readSet,
-        {
-          ...context,
-          reviewSnapshot,
-          claimIsCurrent: () => this.store.isClaimCurrent(row.id, row.attempts),
-        },
-      );
-      const applied = applyResult.outcome === "applied";
-      const audit: AuditInput = {
-        ...context,
-        outcome: applied ? "applied" : "rejected",
-        summary: applied ? "batch applied" : "batch rejected",
-        operationCount: parsed.operations.length,
-        operationsHash: hashOperations(parsed.operations),
-        skillNames: parsed.operations.map((operation) => operation.skillName),
-        ...(applied
-          ? {}
-          : {
-              rejectionReason: `apply outcome: ${applyResult.outcome}${
-                applyResult.rejectionReason ? `: ${applyResult.rejectionReason}` : ""
-              }`.slice(0, 300),
-            }),
-      };
-
-      if (applyResult.outcome === "applied") {
-        const completed = this.store.completeWithAudit(row.id, "applied", row.attempts, audit);
-        if (completed) {
-          for (const operation of parsed.operations) {
-            const activity = operation.type === "create" ? "create" : "patch";
-            const createdBy = operation.type === "create" ? "paseo-curator" : "unknown";
-            this.store.recordSkillActivity(operation.skillName, createdBy, activity);
+      // All validation/apply happens while the reviewer is still running. Never
+      // infer authority or success from final prose or model-supplied identity.
+      let calls = 0;
+      let lastFailure = "missing successful review submission";
+      const reject = (message: string) => { lastFailure = message; return submissionError(message); };
+      const deadline = Date.now() + REVIEW_TIMEOUT_MS;
+      let accepted: { key: string; reply: Awaited<ReturnType<SubmissionHandler>> } | null = null;
+      let terminal = false;
+      let serial: Promise<unknown> = Promise.resolve();
+      const submit: SubmissionHandler = (input, authorized) => {
+        const pending = serial.then(async () => {
+          if (Date.now() >= deadline) return reject("review time budget exhausted");
+          if (!await authorized()) return reject("review authorization revoked or expired");
+          const parsed = validateSubmission(input);
+          const key = parsed.ok ? hashOperations(parsed.value.operations) + parsed.value.outcome : null;
+          if (accepted) return key === accepted.key ? accepted.reply : reject("review already submitted; a different submission is not allowed");
+          if (terminal || !this.store.isClaimCurrent(row.id, row.attempts)) return reject("queue claim is no longer current");
+          if (++calls > MAX_SUBMISSIONS) return reject("submission repair budget exhausted");
+          if (!parsed.ok) return reject(parsed.feedback);
+          const proposal = parsed.value;
+          const stillAuthorized = async () => Date.now() < deadline && await authorized();
+          if (!await stillAuthorized() || !this.store.isClaimCurrent(row.id, row.attempts)) return reject("review authorization revoked or claim expired");
+          if (proposal.outcome === "nothing_to_save") {
+            const completed = this.store.completeWithAudit(row.id, "nothing_to_save", row.attempts, {
+              ...context, outcome: "nothing_to_save", summary: "nothing to save", operationCount: 0,
+              operationsHash: hashOperations([]), skillNames: [],
+            });
+            if (!completed) return reject("queue claim is no longer current");
+          } else {
+            const result = await this.skillManager.applyBatch(proposal.operations, [], {
+              ...context, reviewSnapshot, authorized: stillAuthorized,
+              claimIsCurrent: () => this.store.isClaimCurrent(row.id, row.attempts),
+            });
+            const applied = result.outcome === "applied";
+            const audit: AuditInput = {
+              ...context, outcome: applied ? "applied" : "rejected",
+              summary: applied ? "batch applied" : "batch rejected", operationCount: proposal.operations.length,
+              operationsHash: hashOperations(proposal.operations), skillNames: proposal.operations.map(op => op.skillName),
+              ...(applied ? {} : { rejectionReason: `apply outcome: ${result.outcome}; ${managerFeedback(result.rejectionReason)}` }),
+            };
+            if (!applied) {
+              this.store.recordAuditIfClaimCurrent(row.id, row.attempts, audit);
+              if (result.outcome === "rollback_failed") {
+                terminal = true;
+                if (this.store.fail(row.id, "rollback failed; reconciliation required", row.attempts)) {
+                  await this.notifyBestEffort({ outcome: "failed", sourceAgentId: row.sourceAgentId, turnId: row.turnId });
+                }
+                return reject("rollback failed; reconciliation required; stop this review");
+              }
+              return reject(managerFeedback(result.rejectionReason));
+            }
+            // The receipt already exists. Commit queue + audit before reporting
+            // tool success, so a later provider error cannot erase applied work.
+            if (!this.store.completeWithAudit(row.id, "applied", row.attempts, audit)) {
+              terminal = true;
+              return reject("claim expired after apply; durable receipt requires reconciliation");
+            }
           }
-          await this.notifyBestEffort({
-            outcome: "applied",
-            sourceAgentId: row.sourceAgentId,
-            turnId: row.turnId,
-            operationCount: parsed.operations.length,
-            skillNames: [...new Set(parsed.operations.map((operation) => operation.skillName))],
-          });
-        }
-      } else if (applyResult.outcome === "rollback_failed") {
-        this.store.recordAuditIfClaimCurrent(row.id, row.attempts, audit);
-        const failed = this.store.fail(
-          row.id,
-          "rollback failed; reconciliation required",
-          row.attempts,
-        );
-        if (failed) {
-          await this.notifyBestEffort({
-            outcome: "failed",
-            sourceAgentId: row.sourceAgentId,
-            turnId: row.turnId,
-          });
-        }
-      } else {
-        this.store.recordAuditIfClaimCurrent(row.id, row.attempts, audit);
-        // Carry the manager's structured, secret-safe reason into the queue
-        // row so failures are diagnosable without forensic reproduction.
-        await this.retryOrFailAndNotify(
-          row,
-          `apply not applied: ${applyResult.rejectionReason ?? applyResult.outcome}`.slice(0, 300),
-        );
+          const reply = { text: `Review accepted: ${proposal.outcome}`, structuredContent: { accepted: true, outcome: proposal.outcome } };
+          accepted = { key: key!, reply };
+          if (proposal.outcome === "saved") {
+            for (const op of proposal.operations) {
+              try { this.store.recordSkillActivity(op.skillName, op.type === "create" ? "paseo-curator" : "unknown", op.type === "create" ? "create" : "patch"); } catch { /* audit is already durable */ }
+            }
+            await this.notifyBestEffort({ outcome: "applied", sourceAgentId: row.sourceAgentId, turnId: row.turnId,
+              operationCount: proposal.operations.length, skillNames: [...new Set(proposal.operations.map(op => op.skillName))] });
+          }
+          return reply;
+        });
+        serial = pending.catch(() => { terminal = true; });
+        return pending;
+      };
+      try {
+        await this.adapter.runCurator(rereadAgent, row.turnId, prompt, `${row.id}:${row.attempts}`, this.skillManager.reviewSkillFiles(reviewSnapshot), submit);
+        await serial;
+      } catch (error) {
+        await serial;
+        if (!accepted) throw error;
+      }
+      if (!accepted) {
+        if (this.store.isClaimCurrent(row.id, row.attempts) && await this.reconcileRow(row)) return "failed";
+        return this.retryOrFailAndNotify(row, lastFailure);
       }
       return "failed";
     } catch (err) {
+      // A callback may have committed a receipt before a database/provider
+      // failure. Reconcile it now, even on the last retry, before failing.
+      if (this.store.isClaimCurrent(row.id, row.attempts)) {
+        try { if (await this.reconcileRow(row)) return "failed"; } catch { /* receipt remains for recovery */ }
+      }
       // Bounded and content-free: only the identity and a safe category.
       // Never a transcript or model output fragment.
       return this.retryOrFailAndNotify(
@@ -526,6 +481,53 @@ export class CuratorOrchestrator {
         boundedFailure(row.sourceAgentId, row.turnId, err),
       );
     }
+  }
+
+  private async reconcileRow(row: QueueRecord): Promise<boolean> {
+    const context = { queueId: row.id, sourceAgentId: row.sourceAgentId, turnId: row.turnId };
+    const reconciliation = await this.skillManager.reconcileBatch(context);
+    if (reconciliation.outcome === "applied") {
+      const completed = this.store.completeWithAudit(row.id, "applied", row.attempts, {
+        ...context,
+        outcome: "applied",
+        summary: "reconciled applied batch",
+        operationCount: reconciliation.operationCount,
+        operationsHash: reconciliation.operationsHash,
+        skillNames: reconciliation.skillNames,
+      });
+      if (completed) {
+        await this.notifyBestEffort({
+          outcome: "applied",
+          sourceAgentId: row.sourceAgentId,
+          turnId: row.turnId,
+          operationCount: reconciliation.operationCount,
+          skillNames: reconciliation.skillNames,
+        });
+      }
+      return true;
+    }
+    if (reconciliation.outcome === "reconciliation_required") {
+      this.store.recordAuditIfClaimCurrent(row.id, row.attempts, {
+        ...context,
+        outcome: "rejected",
+        summary: "filesystem reconciliation required",
+        operationCount: reconciliation.operationCount ?? 0,
+        operationsHash: reconciliation.operationsHash ?? hashOperations([]),
+        skillNames: reconciliation.skillNames ?? [],
+        rejectionReason: "filesystem reconciliation required",
+      });
+      const failed = this.store.fail(row.id, "filesystem reconciliation required", row.attempts);
+      if (failed) {
+        await this.notifyBestEffort({
+          outcome: "failed",
+          sourceAgentId: row.sourceAgentId,
+          turnId: row.turnId,
+        });
+      }
+      return true;
+    }
+
+    return false;
   }
 
   private async retryOrFailAndNotify(
@@ -545,7 +547,13 @@ export class CuratorOrchestrator {
 
   private async notifyBestEffort(notification: CuratorActivityNotification): Promise<void> {
     try {
-      await this.notify(notification);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.notify(notification),
+          new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); }),
+        ]);
+      } finally { clearTimeout(timer); }
     } catch (err) {
       // Timeline visibility must never change the durable review outcome.
       // Surface only the error's class name (never its message, which may

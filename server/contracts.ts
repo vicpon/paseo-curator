@@ -5,7 +5,7 @@ import { z } from "zod";
  *
  * These are the shared, schema-validated types that every other module
  * consumes. They are the single source of truth for the shapes that flow
- * between the durable queue, the skill manager, the review prompt/parser,
+ * between the durable queue, the skill manager, the review prompt/submission tool,
  * the lifecycle orchestrator, and the maintenance pass.
  *
  * All schemas are strict (no unknown keys) because model output is untrusted
@@ -159,7 +159,7 @@ export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 export const ReviewOutcomeSchema = z.enum(["saved", "nothing_to_save"]);
 export type ReviewOutcome = z.infer<typeof ReviewOutcomeSchema>;
 
-/** The one JSON document a curator agent returns for a queued review. */
+/** The structured arguments a curator submits for a queued review. */
 export const ReviewResultSchema = z
   .object({
     summary: z.string().min(1),

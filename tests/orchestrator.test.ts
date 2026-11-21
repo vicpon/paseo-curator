@@ -1,3 +1,4 @@
+import type { SubmissionHandler } from "../server/review-submission";
 import { describe, expect, it } from "vitest";
 
 import { CuratorStore, type StoreConfig } from "../server/store";
@@ -32,7 +33,6 @@ const SAVED_DOC = {
       newText: "## Rules (v2)",
     },
   ],
-  readSet: [{ skillName: "git-hygiene", path: "SKILL.md", content: SKILL_MD, hash: SKILL_MD_HASH }],
 };
 
 /** Raw curator output: exactly one plain JSON object. */
@@ -43,7 +43,6 @@ const NOTHING_DOC = {
   summary: "Nothing reusable in this turn.",
   outcome: "nothing_to_save" as const,
   operations: [] as SkillOperation[],
-  readSet: [] as unknown[],
 };
 
 /** Raw curator output for the nothing_to_save case. */
@@ -107,7 +106,7 @@ class FakeAdapter {
     this.reads.set(this.key(agentId, turnId), read);
   }
 
-  setFinalText(agentId: string, turnId: string, text: string): void {
+  setSubmissionJSON(agentId: string, turnId: string, text: string): void {
     this.texts.set(this.key(agentId, turnId), text);
   }
 
@@ -117,7 +116,7 @@ class FakeAdapter {
   }
 
   /** Replace the static final text with a sequence served one call at a time. */
-  setTextSequence(agentId: string, turnId: string, ...texts: string[]): void {
+  setSubmissionSequence(agentId: string, turnId: string, ...texts: string[]): void {
     this.textSeqs.set(this.key(agentId, turnId), [...texts]);
   }
 
@@ -157,7 +156,7 @@ class FakeAdapter {
     return read;
   }
 
-  async runCurator(agent: SourceAgent, turnId: string, prompt: string): Promise<CuratorRunResult> {
+  async runCurator(agent: SourceAgent, turnId: string, prompt: string, _reviewId?: string, _files?: unknown, submit?: SubmissionHandler): Promise<CuratorRunResult> {
     this.runCuratorCalls.push({ agent, turnId, prompt });
     const k = this.key(agent.id, turnId);
     const seq = this.textSeqs.get(k);
@@ -166,7 +165,8 @@ class FakeAdapter {
       if (seq.length === 0) {
         this.textSeqs.delete(k);
       }
-      return { curatorAgentId: `curator-${agent.id}-${turnId}`, finalText: text };
+      await this.submitJSON(text, submit);
+      return { curatorAgentId: `curator-${agent.id}-${turnId}`, finalText: "display only" };
     }
     const text = this.texts.get(k);
     if (text === undefined) {
@@ -174,7 +174,13 @@ class FakeAdapter {
       if (err) throw err;
       throw new Error(`fake adapter: no final text configured for ${agent.id} / ${turnId}`);
     }
-    return { curatorAgentId: `curator-${agent.id}-${turnId}`, finalText: text };
+    await this.submitJSON(text, submit);
+    return { curatorAgentId: `curator-${agent.id}-${turnId}`, finalText: "display only" };
+  }
+  private async submitJSON(text: string, submit?: SubmissionHandler): Promise<void> {
+    let argumentsValue: unknown;
+    try { argumentsValue = JSON.parse(text); } catch { return; }
+    await submit!(argumentsValue, async () => true);
   }
 }
 
@@ -491,7 +497,7 @@ describe("CuratorOrchestrator", () => {
           "turn-1",
           makeRead("agent-C", "turn-1", [{ role: "user", content: "fix bug" }], 1),
         );
-        env.adapter.setFinalText("agent-C", "turn-1", SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON("agent-C", "turn-1", SAVED_FINAL_TEXT);
 
         // Simulate the hook double-firing for the same turn: two concurrent
         // completed events for the exact same source turn.
@@ -523,7 +529,7 @@ describe("CuratorOrchestrator", () => {
   );
 
   it(
-    "processing reads the exact turn, builds the prompt, runs the curator, parses output, applies to skillManager, and marks the row applied",
+    "processing reads the exact turn, builds the prompt, runs the curator, handles submission, applies to skillManager, and marks the row applied",
     async () => {
       const env = setup();
       try {
@@ -543,7 +549,7 @@ describe("CuratorOrchestrator", () => {
             12,
           ),
         );
-        env.adapter.setFinalText("agent-D", turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON("agent-D", turnId, SAVED_FINAL_TEXT);
 
         // Manually enqueue the row (simulating a prior threshold crossing).
         const row = env.store.enqueue("agent-D", turnId);
@@ -568,11 +574,7 @@ describe("CuratorOrchestrator", () => {
         expect(mc.operations).toHaveLength(1);
         expect(mc.operations[0].type).toBe("patch");
         expect(mc.operations[0].skillName).toBe("git-hygiene");
-        expect(mc.readSet).toHaveLength(1);
-        expect(mc.readSet[0].skillName).toBe("git-hygiene");
-        expect(mc.readSet[0].path).toBe("SKILL.md");
-        expect(mc.readSet[0].content).toBe(SKILL_MD);
-        expect(mc.readSet[0].hash).toBe(SKILL_MD_HASH);
+        expect(mc.readSet).toEqual([]);
         expect(mc.context).toEqual(expect.objectContaining({
           queueId: row!.id,
           sourceAgentId: "agent-D",
@@ -624,7 +626,7 @@ describe("CuratorOrchestrator", () => {
             10,
           ),
         );
-        env.adapter.setFinalText("agent-E", turnId, NOTHING_FINAL_TEXT);
+        env.adapter.setSubmissionJSON("agent-E", turnId, NOTHING_FINAL_TEXT);
 
         const row = env.store.enqueue("agent-E", turnId);
         expect(row).not.toBeNull();
@@ -667,7 +669,7 @@ describe("CuratorOrchestrator", () => {
             tid,
             makeRead("agent-F", tid, [{ role: "user", content: `work ${tid}` }], 10),
           );
-          env.adapter.setFinalText("agent-F", tid, SAVED_FINAL_TEXT);
+          env.adapter.setSubmissionJSON("agent-F", tid, SAVED_FINAL_TEXT);
         }
 
         // Call processPending three times concurrently: the orchestrator must
@@ -726,7 +728,7 @@ describe("CuratorOrchestrator", () => {
           usedSkillNames: [],
         };
         env.adapter.addRead(agentId, turnId, read);
-        env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
 
         const row = env.store.enqueue(agentId, turnId);
         expect(row).not.toBeNull();
@@ -781,7 +783,7 @@ describe("CuratorOrchestrator", () => {
           turnId,
           makeRead(agentId, turnId, [{ role: "user", content: "do a thing" }], 10),
         );
-        env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
 
         // Wished lifecycle: start recovers the stale row, then drains the
         // recovered pending work. (RED: CuratorOrchestrator has no `start`
@@ -839,9 +841,12 @@ describe("CuratorOrchestrator", () => {
         turnId,
         makeRead(agentId, turnId, [{ role: "user", content: "extract workflow" }], 10),
       );
-      env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+      env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
       env.store.enqueue(agentId, turnId);
-      env.store.completeWithAudit = () => false;
+      env.store.completeWithAudit = (id, _outcome, attempt) => {
+        env.store.fail(id, "claim superseded by another owner", attempt);
+        return false;
+      };
 
       await env.orch.processPending();
 
@@ -870,7 +875,7 @@ describe("CuratorOrchestrator", () => {
           turnId,
           makeRead(agentId, turnId, [{ role: "user", content: "do a thing" }], 10),
         );
-        env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
         env.store.enqueue(agentId, turnId);
 
         // Start the drain but gate it inside readWholeTurn: the drain is
@@ -975,7 +980,7 @@ describe("CuratorOrchestrator", () => {
           makeRead(agentId, turnId, [{ role: "user", content: "do a thing" }], 10),
         );
         // The curator returns prose containing a sentinel secret on every run.
-        env.adapter.setTextSequence(
+        env.adapter.setSubmissionSequence(
           agentId,
           turnId,
           "I think maybe I should save this. " + SENTINEL,
@@ -1026,7 +1031,7 @@ describe("CuratorOrchestrator", () => {
           turnId,
           makeRead(agentId, turnId, [{ role: "user", content: "extract workflow" }], 10),
         );
-        env.adapter.setFinalText(agentId, turnId, "not json");
+        env.adapter.setSubmissionJSON(agentId, turnId, "not json");
         env.store.enqueue(agentId, turnId);
         env.store.retryOrFail = () => "unchanged";
 
@@ -1063,9 +1068,8 @@ describe("CuratorOrchestrator", () => {
               newText: "## Rules (v2)",
             },
           ],
-          readSet: [{ skillName: "git-hygiene", path: "SKILL.md", content: SKILL_MD, hash: SKILL_MD_HASH }],
-        });
-        env.adapter.setTextSequence(agentId, turnId, inconsistentNothing, inconsistentNothing, inconsistentNothing);
+                });
+        env.adapter.setSubmissionSequence(agentId, turnId, inconsistentNothing, inconsistentNothing, inconsistentNothing);
 
         const row = env.store.enqueue(agentId, turnId);
         expect(row).not.toBeNull();
@@ -1095,7 +1099,7 @@ describe("CuratorOrchestrator", () => {
           turnId,
           makeRead(agentId, turnId, [{ role: "user", content: "extract the workflow" }], 10),
         );
-        env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
         // Every apply attempt reports rejected.
         env.manager.setScript(agentId, turnId, "rejected", "rejected", "rejected");
 
@@ -1125,7 +1129,7 @@ describe("CuratorOrchestrator", () => {
           turnId,
           makeRead(agentId, turnId, [{ role: "user", content: "extract the workflow" }], 10),
         );
-        env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
         env.manager.setScript(agentId, turnId, "rolled_back", "rolled_back", "rolled_back");
 
         env.store.enqueue(agentId, turnId);
@@ -1152,7 +1156,7 @@ describe("CuratorOrchestrator", () => {
           turnId,
           makeRead(agentId, turnId, [{ role: "user", content: "extract the workflow" }], 10),
         );
-        env.adapter.setFinalText(agentId, turnId, SAVED_FINAL_TEXT);
+        env.adapter.setSubmissionJSON(agentId, turnId, SAVED_FINAL_TEXT);
         env.manager.setScript(agentId, turnId, "rollback_failed", "rollback_failed", "rollback_failed");
 
         env.store.enqueue(agentId, turnId);

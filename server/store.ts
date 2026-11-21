@@ -236,6 +236,19 @@ export class CuratorStore {
         INSERT INTO schema_migrations (version, applied_at) VALUES (2, '${new Date().toISOString()}');
       `);
     }
+    if (!this.db.prepare("SELECT 1 FROM schema_migrations WHERE version = 3").get()) {
+      // Repaired submissions can reject distinct batches, or leave partial effects
+      // after an earlier harmless rejection. Preserve each immutable failure record.
+      this.db.exec(`
+        DROP INDEX audit_log_terminal_outcome;
+        CREATE UNIQUE INDEX audit_log_terminal_outcome ON audit_log(queue_id, outcome)
+          WHERE outcome IN ('applied','nothing_to_save');
+        CREATE UNIQUE INDEX audit_log_rejected_submission
+          ON audit_log(queue_id, operations_hash, IFNULL(rejection_reason, ''))
+          WHERE outcome = 'rejected';
+        INSERT INTO schema_migrations (version, applied_at) VALUES (3, '${new Date().toISOString()}');
+      `);
+    }
     this.db.exec(`
       INSERT OR IGNORE INTO observed_turns (source_agent_id, turn_id, observed_at)
         SELECT source_agent_id, turn_id, updated_at FROM queue;
@@ -313,12 +326,15 @@ export class CuratorStore {
       timestamp,
       skillNames: [...new Set(input.skillNames)].sort(),
     });
+    const duplicateTarget = record.outcome === "rejected"
+      ? "(queue_id, operations_hash, IFNULL(rejection_reason, '')) WHERE outcome = 'rejected'"
+      : "(queue_id, outcome) WHERE outcome IN ('applied','nothing_to_save')";
     this.db.prepare(
       `INSERT INTO audit_log
        (queue_id, source_agent_id, turn_id, outcome, summary, operation_count,
         operations_hash, skill_names_json, rejection_reason, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(queue_id, outcome) DO NOTHING`,
+       ON CONFLICT${duplicateTarget} DO NOTHING`,
     ).run(
       record.queueId, record.sourceAgentId, record.turnId, record.outcome,
       record.summary, record.operationCount, record.operationsHash,

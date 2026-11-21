@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 
 import { buildSkillFileContext, type ReviewPromptInput, type TimelineEntry } from "./review-prompt";
 import type { RoutingProviders, ReviewConfig } from "../shared/routing";
+import { REVIEW_TIMEOUT_MS, type SubmissionHandler } from "./review-submission";
+import type { ReviewTools } from "./review-tools";
 import { routingSettingsSchema } from "../shared/settings";
 
 // ---------------------------------------------------------------------------
@@ -53,12 +55,13 @@ export interface PaseoApiRef {
 
 interface CuratorRoute {
   config: ReviewConfig;
-  consent?: { fallbackProvider: string; fallbackModel?: string };
+  consent?: { fallbackProvider: string; fallbackModel?: string; revision?: string };
 }
 
 export interface RoutingSettings {
   read(): Promise<{
     status: "ready" | "invalid";
+    revision?: string;
     values?: { fallbackProvider?: string; fallbackModel?: string };
   }>;
 }
@@ -140,7 +143,7 @@ export interface CreateAgentOptions {
   readonly config: ReviewConfig;
   readonly cwd: string;
   readonly parent: string;
-  readonly prompt: string;
+  readonly prompt?: string;
   readonly background: boolean;
   readonly idempotencyKey: string;
   readonly title: string;
@@ -151,6 +154,9 @@ export interface CreateAgentOptions {
 /** A handle on a created agent: its id and the terminal-state waiter. */
 export interface AgentHandle {
   readonly id: string;
+  readonly capabilities?: { supportsMcpServers: boolean; supportsToolInvocations: boolean } | null;
+  readonly run?: (prompt: string, options?: { timeoutMs?: number }) => Promise<WaitForFinishResult>;
+  readonly archive?: () => Promise<unknown>;
   readonly waitForFinish: (timeoutMs?: number) => Promise<WaitForFinishResult>;
 }
 
@@ -274,6 +280,7 @@ export class PaseoAdapter {
   constructor(
     private readonly paseo: PaseoApiRef,
     private readonly settings?: RoutingSettings,
+    private readonly reviewTools?: ReviewTools,
   ) {}
 
   private async providerEnabled(provider: string): Promise<boolean> {
@@ -307,7 +314,7 @@ export class PaseoAdapter {
       const state = await this.settings?.read();
       const values = state?.status === "ready" ? routingSettingsSchema.safeParse(state.values) : null;
       return values?.success && values.data.fallbackProvider
-        ? { fallbackProvider: values.data.fallbackProvider, ...(values.data.fallbackModel ? { fallbackModel: values.data.fallbackModel } : {}) } : undefined;
+        ? { fallbackProvider: values.data.fallbackProvider, ...(values.data.fallbackModel ? { fallbackModel: values.data.fallbackModel } : {}), ...(state?.revision ? { revision: state.revision } : {}) } : undefined;
     } catch { return undefined; }
   }
 
@@ -523,26 +530,16 @@ export class PaseoAdapter {
     }
   }
 
-  /**
-   * Create a curator agent for a completed turn, wait for it to finish, and
-   * return the curator's id and final text.
-   *
-   * Success is exactly: the create resolves, a single `waitForFinish` call
-   * returns a terminal result of `status: "idle"` with a non-empty
-   * `lastMessage`. Every failure path — a create rejection, a wait
-   * rejection, or an idle result whose `lastMessage` is null or empty —
-   * throws a {@link CuratorRunError} bounded to the source agent id, turn
-   * id, and a safe category. The source agent's prompt is never echoed, and
-   * a thrown provider message is not included in the error text when it may
-   * echo the prompt or model output; the safe category carries the failure.
-   */
+  /** Open with an identity-bound tool before sending source data. Prose is display-only. */
   async runCurator(
     sourceAgent: SourceAgent,
     turnId: string,
     prompt: string,
     reviewId?: string,
     skillFiles?: ReviewPromptInput["skillFiles"],
+    submit?: SubmissionHandler,
   ): Promise<CuratorRunResult> {
+    if (!this.reviewTools || !submit || !reviewId) throw curatorError(sourceAgent.id, turnId, "structured-tool-injection-unavailable");
     const provider = sourceAgent.provider.trim();
     const selection = provider.includes("/") ? provider
       : sourceAgent.model?.trim() ? `${provider}/${sourceAgent.model.trim()}` : null;
@@ -561,22 +558,34 @@ export class PaseoAdapter {
       const routeKey = `${selected.config.provider}:${createHash("sha256").update(JSON.stringify(selected.config)).digest("hex").slice(0, 16)}`;
       const reviewKey = reviewId === undefined ? turnId : JSON.stringify([turnId, reviewId]);
       const agentId = deriveCuratorAgentId(sourceAgent.id, `${reviewKey}:${routeKey}`);
+      const binding = this.reviewTools!.bind({ agentId, provider: selected.config.provider, cwd: sourceAgent.cwd,
+        sourceAgentId: sourceAgent.id, turnId, reviewId, submit,
+        authorized: async () => await this.providerEnabled(selected.config.provider.split("/")[0])
+          && (!selected.consent || JSON.stringify(await this.readFallbackSetting()) === JSON.stringify(selected.consent)),
+      });
       try {
         const handle = await this.paseo.agents.create({
           agentId,
           config: selected.config,
           cwd: sourceAgent.cwd,
           parent: sourceAgent.id,
-          prompt: selected.config.provider.startsWith("opencode/") ? `${prompt}\n\n${buildSkillFileContext(skillFiles ?? [])}` : prompt,
           background: true,
           idempotencyKey: `paseo-curator:${sourceAgent.id}:${reviewKey}:${routeKey}`,
           title: `Curator: ${sourceAgent.id} / ${turnId}`,
           labels: { "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
           metadata: { "paseo.curator": true, "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
         });
-        if (handle.id !== agentId) throw new Error("curator identity mismatch");
-        return { handle };
-      } catch {
+        if (handle.id !== agentId) throw curatorError(sourceAgent.id, turnId, "curator-identity-mismatch");
+        // Discover the actual opened session's capabilities before sending source data.
+        if (!binding.attached || !handle.run || handle.capabilities?.supportsMcpServers !== true
+          || handle.capabilities.supportsToolInvocations !== true) {
+          await handle.archive?.().catch(() => undefined);
+          throw curatorError(sourceAgent.id, turnId, "structured-tool-injection-unavailable");
+        }
+        return { handle, binding, selected };
+      } catch (error) {
+        await binding.close();
+        if (error instanceof CuratorRunError) throw error;
         throw curatorError(sourceAgent.id, turnId, "create-failed");
       }
     };
@@ -585,29 +594,32 @@ export class PaseoAdapter {
     try {
       created = await create(route);
     } catch (error) {
-      if (error instanceof CuratorRunError && !error.message.endsWith("create-failed")) throw error;
+      if (error instanceof CuratorRunError && !error.message.endsWith("create-failed") && !error.message.endsWith("structured-tool-injection-unavailable")) throw error;
       const fallback = route.consent ? null : await this.resolveFallbackProvider();
       if (!fallback || fallback.config.provider === route.config.provider) {
-        throw curatorError(sourceAgent.id, turnId, "create-failed");
+        throw error;
       }
       created = await create(fallback);
     }
-    const { handle } = created;
-
-    let result: WaitForFinishResult;
+    const { handle, binding, selected } = created;
     try {
-      // A single wait; the fixed timeout bounds the wait if the provider
-      // ever stalls before reporting a terminal state.
-      result = await handle.waitForFinish(CURATOR_WAIT_TIMEOUT_MS);
-    } catch {
+      if (!await this.providerEnabled(selected.config.provider.split("/")[0])) throw curatorError(sourceAgent.id, turnId, "provider-unavailable");
+      if (selected.consent && JSON.stringify(await this.readFallbackSetting()) !== JSON.stringify(selected.consent)) {
+        throw curatorError(sourceAgent.id, turnId, "fallback-unavailable");
+      }
+      const result = await handle.run!(`${prompt}\n\n${buildSkillFileContext(skillFiles ?? [])}`, { timeoutMs: REVIEW_TIMEOUT_MS });
+      if (result.status !== "idle") {
+        if (result.status === "timeout" || result.status === "permission") await handle.archive?.().catch(() => undefined);
+        throw curatorError(sourceAgent.id, turnId, `terminal-status:${result.status}`);
+      }
+      // Final assistant text is display-only. Durable success comes from the tool.
+      return { curatorAgentId: handle.id, finalText: "" };
+    } catch (error) {
+      if (error instanceof CuratorRunError) throw error;
       throw curatorError(sourceAgent.id, turnId, "wait-failed");
+    } finally {
+      await binding.close();
     }
-
-    if (result.status !== "idle" || result.lastMessage === null || result.lastMessage === "") {
-      throw curatorError(sourceAgent.id, turnId, `terminal-status:${result.status}`);
-    }
-
-    return { curatorAgentId: handle.id, finalText: result.lastMessage };
   }
 
   private finish(
@@ -675,12 +687,6 @@ function describeThrown(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 
-/**
- * Fixed `waitForFinish` timeout for the curator run. Bounds the wait if the
- * provider ever stalls before reporting a terminal state; the terminal
- * result it produces is still validated before being accepted.
- */
-const CURATOR_WAIT_TIMEOUT_MS = 300_000;
 
 function deriveCuratorAgentId(sourceAgentId: string, turnId: string): string {
   const chars = createHash("sha256")

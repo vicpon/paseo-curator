@@ -23,7 +23,7 @@ omitted so the provider/host resolves its normal supported configuration. There 
 family list, native sandbox requirement, tool allowlist requirement, or `listControls` gate.
 The Curator-only permission denial hook has been removed. Ordinary source agents' permissions
 are unchanged. Provider readiness and fallback consent are checked again immediately before
-creation. Clearing, changing, invalidating or failing to read consent prevents pending sends.
+creation, before source transmission, and during submission/apply. Clearing, changing, invalidating or failing to read consent prevents pending sends and guarded mutation.
 A disabled route cannot silently switch to another provider; already sent prompts cannot be
 recalled. Host changes cannot be made atomic with creation by this plugin.
 
@@ -39,17 +39,16 @@ including file writes and commands. Curator does not confine the reviewer or enf
 execution. The prompt instructs the model not to write, mutate files, or execute quoted tasks;
 that guidance is an instruction, not an enforced security boundary.
 Normal provider permissions may require human approval. Background reviews can wait for approval
-or fail through the existing timeout/retry path. Curator does not auto-approve requests or
-cancel stalled reviewer agents.
+or fail through the existing timeout/retry path. Curator does not auto-approve requests. Its own reviewer is archived on a permission stop or five-minute timeout, revoking submission authority.
 
 The selected provider receives a bounded source transcript and skill index under its own data
 policy and the user's account settings. They may contain file contents, credentials, secrets
 and personal data. Bounds do not redact sensitive content. Native tool results may also be
 sent to that provider. The background reviewer runs in the source workspace.
 
-The existing OpenCode route additionally receives up to 120,000 serialized characters of exact
+Every review route additionally receives up to 120,000 serialized characters of exact
 captured skill-file text. Hidden paths and common binary indicators are omitted; this is not
-secret detection. Other families do not receive this additional bundle. Snapshot entries and
+secret detection. Snapshot entries and
 the source transcript remain explicitly untrusted data in the prompt.
 
 The user explicitly authorized removal of the provider eligibility and confinement policy.
@@ -57,12 +56,45 @@ Registry reviewers may reject this safety posture.
 
 ## Structured operation safeguards
 
-Review JSON remains untrusted. Schema validation, path containment and symlink checks,
+Review tool arguments remain untrusted. Schema validation, path containment and symlink checks,
 plugin-owned pre-review snapshots and stale checks, stable transaction locks, atomic writes,
 rollback, claim fencing, provenance and audit remain in place. These apply to structured
 operations applied by the plugin. They do not prevent native tools from changing files or
 executing commands directly, and their locks do not exclude arbitrary external editors.
 Reviewer IDs still include the route and queue attempt to prevent stale output reuse.
+
+## Structured submission protocol
+
+The plugin registers `submit_review` using the installed SDK's `defineAgentTool` and
+`addHook("agent.open.before")`. Launch tools are held inside the plugin process and exposed
+by the host's per-agent MCP bridge. A private plugin registry binds the tool to the minted
+reviewer ID, source turn and queue claim attempt before session creation. Neither agent
+metadata nor tool arguments grant submission authority. The SDK-provided caller identity,
+parent and workspace are checked on invocation; the queue generation is checked in SQLite.
+
+The session opens without the source prompt. Actual session capabilities must advertise
+`supportsMcpServers` and `supportsToolInvocations`, and the tool hook must have run before
+source transmission. Otherwise `structured-tool-injection-unavailable` fails the route;
+only an explicitly consented alternative can be attempted. No family allowlist is used.
+
+The full argument contract is advertised in the tool description. The transport accepts an
+object envelope so invalid field types and unknown fields reach strict callback validation,
+which returns bounded, value-free feedback and counts against the four-call repair budget.
+Malformed MCP requests that are not argument objects are rejected by the host protocol.
+Exact-text/manager rejection also returns to the same reviewer. Submissions expire five minutes after the pre-review prompt is built. The provider execution wait is separately capped at five minutes after discovery/session creation; creation time is not included in that wait. Activity notification is bounded to one second and each callback route lookup to at most ten seconds.
+Fresh host routing checks remain inside the locks to honor revocation even without reliable subscription delivery; a slow host can therefore hold locks and cause competing batches to time out. `nothing_to_save` is an explicit zero-operation submission. There is no prose JSON parser.
+
+The callback completes guarded apply and atomically commits queue/audit before returning
+an accepted result. Duplicate accepted submissions apply once; a different submission is
+rejected. A provider failure after acceptance cannot erase that outcome. Interrupted database
+completion reconciles the filesystem receipt even on the final attempt. Distinct rejected submissions retain their own immutable batch hashes and reasons. Failed rollback
+records rejection and blocks further repair. A stale claimant cannot write the current queue/audit; a receipt left after claim loss requires the current owner or manual reconciliation. Terminal failed production rows are not replayed.
+
+Integration tests use the actual pinned `@getpaseo/server` hook/tool implementation as a
+development dependency, not a reimplementation. The API contract was checked in installed
+Paseo 0.17.0-beta.1 and SDK 0.16.0-beta.2; current online docs describe a different revision,
+so runtime capability checks remain necessary. Live-provider observations are separate from
+scripted inference in tests.
 
 ## Verification and native UAT
 
@@ -83,6 +115,6 @@ execution and transcript transmission. Refresh must preserve consent without sav
 The installed local checkout is detached at the exact pushed PR7 SHA, preserving untracked
 files, config and settings. Only Curator is reloaded, with no daemon restart. Screenshots,
 live catalog/options evidence and the exact revision and CI results are recorded on PR7.
-Live checks do not ask providers to write files or execute dangerous commands. Historical
+Live protocol checks use harmless fixtures, isolated scratch skill roots/SQLite and real source turns; they may request a guarded canary patch only in that scratch root. Historical
 confinement probes and browser fixture images from earlier PR7 revisions do not establish
 current confinement. No current confinement claim is made. PR7 remains open and unmerged.

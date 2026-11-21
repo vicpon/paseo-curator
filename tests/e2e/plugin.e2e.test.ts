@@ -1,3 +1,4 @@
+import { reviewHost } from "../review-host";
 import { routingSnapshot, routingModels, routingControls } from "../routing-fixtures";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,9 +38,10 @@ describe("curator plugin end to end", () => {
       adapter: {
         readWholeTurn: async () => ({ sourceAgentId: "agent", turnId: "turn", provider: "test", model: null,
           cwd: root, entries: [], toolIterations: 10, usedSkillNames: [] }),
-        runCurator: async () => {
+        runCurator: async (_agent, _turn, _prompt, _reviewId, _files, submit) => {
           if (changed) writeFileSync(file, "Original plus newer content");
-          return { curatorAgentId: "review", finalText: JSON.stringify({ summary: "lesson", outcome: "saved", operations: [operation] }) };
+          await submit!({ summary: "lesson", outcome: "saved", operations: [operation] }, async () => true);
+          return { curatorAgentId: "review", finalText: "ignored" };
         },
       },
     });
@@ -81,6 +83,7 @@ describe("curator plugin end to end", () => {
     const file = join(root, "alpha", "references/notes.md");
     const store = new CuratorStore(":memory:", { maxRetries: 2 });
     const results = new Map<string, string>();
+    const host = reviewHost();
     const adapter = new PaseoAdapter({
       providers: {
         waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }]),
@@ -99,10 +102,13 @@ describe("curator plugin end to end", () => {
               results.set(options.agentId, JSON.stringify({ summary: "new review", outcome: "nothing_to_save", operations: [] }));
             }
           }
-          return { id: options.agentId, waitForFinish: async () => ({ status: "idle", final: null, error: null, lastMessage: results.get(options.agentId)! }) };
+          await host.open(options);
+          return { id: options.agentId, capabilities: { supportsMcpServers: true, supportsToolInvocations: true },
+            waitForFinish: async () => { throw new Error("unused"); },
+            run: async () => { await host.call(options, JSON.parse(results.get(options.agentId)!)); return { status: "idle", final: null, error: null, lastMessage: "ignored" }; } };
         },
       },
-    });
+    }, undefined, host.reviews);
     const orchestrator = new CuratorOrchestrator({
       store, skillManager: new SkillManager(root), listSkills: async () => [], schedule: () => {},
       adapter: {
@@ -119,6 +125,7 @@ describe("curator plugin end to end", () => {
       expect(readFileSync(file, "utf8")).toBe("Newer content added during review");
     } finally {
       await orchestrator.shutdown();
+      await host.close();
       store.close();
       cleanupRoot(root);
     }
@@ -134,7 +141,6 @@ describe("curator plugin end to end", () => {
       summary: "Reusable workflow found.",
       outcome: "saved",
       operations: [{ type: "create", skillName: "learned-workflow", content: skillContent }],
-      readSet: [],
     });
     const page = {
       agentId: "source-1",
@@ -158,6 +164,7 @@ describe("curator plugin end to end", () => {
       staleCursor: false,
       gap: false,
     };
+    const host = reviewHost();
     const paseo = {
       providers: {
         waitForReady: async () => routingSnapshot([{ provider: "codex", status: "ready", enabled: true }]),
@@ -167,10 +174,12 @@ describe("curator plugin end to end", () => {
       agents: {
         list: async () => ({ entries: [], pageInfo: {}, requestId: "req-1" }),
         ref: () => ({ timeline: { refetch: async () => page, append: async () => ({}) } }),
-        create: async (options: { agentId: string }) => ({
-          id: options.agentId,
-          waitForFinish: async () => ({ status: "idle", final: null, error: null, lastMessage: finalText }),
-        }),
+        create: async (options: CreateAgentOptions) => {
+          await host.open(options);
+          return { id: options.agentId, capabilities: { supportsMcpServers: true, supportsToolInvocations: true },
+            waitForFinish: async () => { throw new Error("unused"); },
+            run: async () => { await host.call(options, JSON.parse(finalText)); return { status: "idle", final: null, error: null, lastMessage: "ignored" }; } };
+        },
       },
     };
     const config: PluginConfig = {
@@ -184,7 +193,7 @@ describe("curator plugin end to end", () => {
       archiveDays: 30,
       maxRetries: 3,
     };
-    const runtime = createProductionRuntime(paseo as never, config, { stateDir });
+    const runtime = createProductionRuntime(paseo as never, config, { stateDir, reviewTools: host.reviews });
 
     await runtime.start();
     await runtime.handleCompletedTurn(
@@ -197,6 +206,7 @@ describe("curator plugin end to end", () => {
     expect(readFileSync(skillPath, "utf8")).toBe(skillContent);
     await runtime.shutdown();
     await runtime.close();
+    await host.close();
     const persisted = new CuratorStore(join(stateDir, "curator.sqlite"));
     expect(persisted.get("source-1", "turn-1")?.status).toBe("applied");
     expect(persisted.listAudit()).toEqual([

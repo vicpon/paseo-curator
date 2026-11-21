@@ -11,13 +11,13 @@ For example, it can preserve:
 - a project or tool constraint that an existing skill omitted;
 - a repeatable sequence that should become a checklist or helper script.
 
-The curator returns structured proposals such as "create this skill," "replace this exact text," or "remove this support file." The plugin checks paths, provenance, pre-review file versions, operation limits, and rollback safety before applying them. User-owned skills can be patched and their support files removed. Only archival is restricted to curator-created skills.
+The curator submits structured requests through `submit_review`, such as "create this skill," "replace this exact text," or "remove this support file." The plugin checks paths, provenance, pre-review file versions, operation limits, and rollback safety before applying them. User-owned skills can be patched and their support files removed. Only archival is restricted to curator-created skills.
 
 ## Requirements
 
 - Paseo daemon and app with the APIs used by SDK `0.16.0-beta.2`; manifest range `>=0.16.0-beta.2`. Future breaking releases are not guaranteed compatible. Native screenshots were checked on Linux with `0.17.0-beta.1`; macOS and Windows were not checked.
 - Node.js **22.13.0 or later** (`node:sqlite` without an experimental flag), plus npm on the daemon PATH for Git preparation.
-- An enabled, ready provider with working credentials, selected-model access and its required CLI/runtime. Each background review consumes provider quota and may incur usage costs. Readiness alone does not verify account/model access.
+- An enabled, ready provider with working credentials, selected-model access, its required CLI/runtime, and live session support for MCP servers and tool invocations. Each background review consumes provider quota and may incur usage costs. Readiness alone does not verify account/model access.
 
 Reviews preserve the exact source provider/model when available. All enabled, ready providers from the live host SDK catalog can be selected, including custom families. The reviewer uses the provider's normal tool permissions and can execute native tools, including file writes and commands. Curator does not confine the reviewer or enforce read-only execution. The prompt's no-write guidance is an instruction, not an enforced boundary. See [routing behavior and verification](docs/routing.md).
 
@@ -85,7 +85,7 @@ The plugin runs its learning pipeline on the server and adds a compact timeline 
 
 In Settings → Plugins → Curator, **Review provider** offers all enabled, ready providers from the host's catalog. **None** (default) disables fallback, not reviews on the source route. Selecting a provider explicitly authorizes transmission to that provider when the exact source route cannot run. **Review model** can follow that provider's default or pin a model. The screen discloses what is sent; refresh preserves both saved selections without saving. Host-disabled and unavailable providers are hidden, including their model controls. A saved inactive choice uses a generic placeholder without substitution.
 
-Provider and model consent are read fresh immediately before fallback creation. Clearing, changing, invalidating, or failing to read settings prevents a pending fallback from sending; submitted reviews cannot be recalled. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum or family eligibility policy.
+Provider and model consent are read fresh before session creation, before sending the source excerpt, and while submitting/applying operations. Clearing, changing, invalidating, or failing to read settings prevents subsequent guarded work on that alternative route; data already transmitted cannot be recalled. When available, the settings revision fences out a prior consent even if the same selection is later restored. Version 1's explicit Codex selection migrates unchanged; invalid legacy values become None. New provider IDs are stored without a fixed provider enum or family eligibility policy.
 
 Other values remain built in:
 
@@ -105,7 +105,7 @@ Other values remain built in:
 
 Overrides for the built-in values require a source change and plugin reload. Fallback never selects another provider automatically. If no permitted route exists, the attempt raises `source-model-unavailable`, retries within the existing budget, and eventually fails with a timeline notice. This is not a successful skip or a `nothing_to_save` verdict.
 
-Normal provider permissions can require human approval. A background review may wait for approval or fail through the existing timeout/retry path; Curator does not automatically approve requests or cancel stalled reviewer agents. Ready status does not prove account/model access. Fallback still requires an enumerated model because the SDK requires a `provider/model` selection; repeated model-discovery errors prevent a send even though the provider remains selectable.
+Normal provider permissions can require human approval. Curator never auto-approves requests. A reviewer returning a permission stop or reaching its five-minute timeout is archived; its submission binding is revoked and in-flight callbacks settle before the attempt ends. Ready status does not prove account/model access. Fallback still requires an enumerated model because the SDK requires a `provider/model` selection; repeated model-discovery errors prevent a send even though the provider remains selectable.
 
 Durable state includes cadence counters, queue claims and retries, reconciliation cursor, skill telemetry, and a content-free audit log. Migration preserves existing `nothing_to_save` outcomes and future exact outcomes, but cannot reconstruct no-op records that older versions already discarded or rewrote. Applied-batch intents and receipts live under `.paseo-curator/` inside the skill root.
 
@@ -113,7 +113,7 @@ Durable state includes cadence counters, queue claims and retries, reconciliatio
 
 The curator prompt contains a bounded excerpt of one completed source turn plus an index of the shared skill library containing names, descriptions and SKILL.md hashes. It can include user and assistant messages, reasoning, tool calls and output, file contents, credentials, secrets, and personal information already present in that turn. The size bounds do not redact sensitive data, and there is no no-credentials or no-file-contents guarantee.
 
-For OpenCode only, the plugin also sends exact captured skill-file text, bounded to 120,000 serialized characters. Hidden paths and common binary indicators are omitted; this is not secret detection or redaction. Other routes do not receive this extra bundle.
+Every review route also receives exact captured skill-file text, bounded to 120,000 serialized characters. Hidden paths and common binary indicators are omitted; this is not secret detection or redaction. These files support exact-text corrections within the same review.
 
 The background agent runs in the source workspace. Native tools can read or change workspace and skill files and execute commands, subject to that provider's normal permissions. Tool results can be sent to the selected provider too. The provider configured for the selected route receives the prompt and tool results under its own data policy and your account settings. The plugin is trusted, unsandboxed daemon code with the daemon user's filesystem and network access.
 
@@ -122,8 +122,21 @@ The background agent runs in the source workspace. Native tools can read or chan
 1. Complete normal work in a Paseo agent.
 2. The plugin accumulates unique tool-call iterations for that source agent.
 3. At 10 accumulated iterations, it queues the completed turn for review.
-4. A background curator proposes zero or more structured skill operations.
-5. The plugin either records `nothing_to_save` or validates and atomically applies the operations.
+4. The plugin opens a reviewer without sending the excerpt, attaches its identity-bound `submit_review` tool, and checks the actual session capabilities.
+5. The reviewer explicitly submits `nothing_to_save` or a batch of operations. Validation feedback returns to that same running reviewer for correction.
+6. A successful accepted tool result records the durable outcome. Final assistant prose is ignored.
+
+## Review submission protocol
+
+`submit_review` accepts exactly `summary`, `outcome` and `operations`. A `saved` outcome requires 1–20 operations; `nothing_to_save` requires an empty array. Reviews cannot archive skills. The existing guarded manager remains the only plugin mutation path.
+
+Schema, exact-text and manager validation errors return bounded, value-free feedback through the tool to the same running reviewer. The reviewer has four submission calls within a five-minute submission window to correct its arguments. There is no final-answer JSON parser and no freeform JSON fallback. The provider execution wait is separately capped at five minutes after discovery/session creation; discovery and creation can add time. Activity notifications wait at most one second; authorization lookups wait at most ten seconds each. Finishing without a successful submission fails with `missing successful review submission` (or the specific bounded submission error); an unavailable registration or session capability fails with `structured-tool-injection-unavailable` before the source excerpt is sent. An explicitly consented alternative can be tried if the source session cannot provide the tool.
+
+The host supplies the calling agent identity. The plugin binds it to the exact reviewer, source turn, queue ID and claim attempt; model arguments cannot choose that authority. Source agents, marker-spoofed agents, closed/replayed bindings, expired claims and revoked alternative routes cannot submit. Authorization and current-claim checks run again under locks and during apply. Duplicate accepted submissions return the original result and never apply twice; different submissions after acceptance are rejected.
+
+The callback applies through the manager, writes its durable receipt, then commits the queue outcome and audit together before returning success. Accepted work remains recorded if final prose is malformed or the provider later errors. If a failure occurs between the filesystem receipt and SQLite completion, reconciliation uses that receipt before any rerun, including on the last attempt. Distinct rejected batches and rollback-failure reasons retain separate immutable audits. Failed rollback records a rejection and requires reconciliation; it cannot be repaired by another model submission. This version does not replay terminal failed production reviews.
+
+Tests include the real pinned Paseo host hook/tool runtime as a development dependency, exercising registration, JSON Schema serialization, host parsing, feedback and invocation with isolated SQLite/files. A scripted provider transport in those tests does not prove live inference; live probes must be reported separately.
 
 ## What you see in Paseo
 
@@ -169,8 +182,8 @@ A successful review ends with queue status `nothing_to_save` or `applied`. An `a
 
 ## Safety and recovery
 
-- Curator output is untrusted JSON. Validation applies only to plugin-applied structured operations; the reviewing agent can execute native tools under the provider's normal permissions. These validation checks apply to structured proposals, not direct native tool actions.
-- The plugin captures byte-exact skill versions before review, then compares touched skills under its locks before any mutation, including `remove_file`. Model-supplied read sets are advisory; the model need not echo files or compute hashes. Changes after capture reject the batch. These locks coordinate plugin batches, not arbitrary external editors.
+- Tool arguments are untrusted structured data. Validation applies only to plugin-applied structured operations; the reviewing agent can execute native tools under the provider's normal permissions. These validation checks apply to structured proposals, not direct native tool actions.
+- The plugin captures byte-exact skill versions before review, then compares touched skills under its locks before any mutation, including `remove_file`. Model-supplied read sets, hashes and identity/claim fields are rejected; the plugin owns the snapshot and authority. Changes after capture reject the batch. These locks coordinate plugin batches, not arbitrary external editors.
 - Paths are contained within the canonical skill root; symlink swaps are checked again at mutation and rollback time.
 - Batches use stable locks, snapshots, atomic file writes, and rollback.
 - A pre-mutation intent journal reconciles crashes between filesystem commit and SQLite queue completion without rerunning nondeterministic curator output.

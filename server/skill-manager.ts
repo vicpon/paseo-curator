@@ -128,7 +128,7 @@ export interface SkillManagerOptions {
 
 type BatchContext = { queueId: string; sourceAgentId: string; turnId: string };
 export type ReviewSnapshot = object;
-type BatchApplyContext = BatchContext & { claimIsCurrent?: () => boolean; reviewSnapshot?: ReviewSnapshot };
+type BatchApplyContext = BatchContext & { claimIsCurrent?: () => boolean; authorized?: () => Promise<boolean>; reviewSnapshot?: ReviewSnapshot };
 export type BatchReconciliation =
   | { outcome: "none" }
   | { outcome: "applied"; operationsHash: string; operationCount: number; skillNames: string[] }
@@ -182,6 +182,7 @@ export class SkillManager {
   private readonly createdTempFiles = new Set<string>();
   /** The archive directory this batch may have created. */
   private archiveDirCreated = false;
+  private batchQueue: Promise<void> = Promise.resolve();
 
   constructor(skillRoot: string, options: SkillManagerOptions = {}) {
     const resolvedRoot = resolve(skillRoot);
@@ -247,6 +248,23 @@ export class SkillManager {
     _readSet: ReadSetEntry[],
     context: BatchApplyContext,
   ): Promise<BatchApplyResult> {
+    return this.withBatchState(() => this.applyQueuedBatch(operations, _readSet, context));
+  }
+
+  private async withBatchState<T>(task: () => Promise<T>): Promise<T> {
+    // Maintenance, recovery and reviews share this manager's rollback scratch.
+    const previous = this.batchQueue;
+    let release!: () => void;
+    this.batchQueue = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { return await task(); }
+    finally { release(); }
+  }
+
+  private async applyQueuedBatch(
+    operations: SkillOperation[], _readSet: ReadSetEntry[], context: BatchApplyContext,
+  ): Promise<BatchApplyResult> {
+    this.archiveDirCreated = false;
     this.createdTempFiles.clear();
 
     // -- Phase 1: validate the whole batch (no mutation) --
@@ -274,7 +292,10 @@ export class SkillManager {
       };
     }
 
+    const permitted = async () => (!context.authorized || await context.authorized())
+      && (!context.claimIsCurrent || context.claimIsCurrent());
     try {
+      if (!await permitted()) return { outcome: "rejected", outcomes: [], fileHashes: new Map(), rejectionReason: "review authorization or queue claim expired" };
       // A concurrent worker may have committed this exact queue batch while
       // this caller waited for the skill locks. Recheck under the locks before
       // honoring a preflight conflict or touching the filesystem.
@@ -342,7 +363,7 @@ export class SkillManager {
       for (let i = 0; i < operations.length; i++) {
         const op = operations[i];
 
-        if (context.claimIsCurrent && !context.claimIsCurrent()) {
+        if (!await permitted()) {
           failedIndex = i;
           outcomes.push({
             index: i,
@@ -388,7 +409,7 @@ export class SkillManager {
         }
       }
 
-      if (failedIndex === -1 && context.claimIsCurrent && !context.claimIsCurrent()) {
+      if (failedIndex === -1 && !await permitted()) {
         failedIndex = operations.length;
       }
 
@@ -461,7 +482,11 @@ export class SkillManager {
   }
 
   /** Reconcile a durable intent before rerunning a nondeterministic curator. */
-  async reconcileBatch(context: BatchContext): Promise<BatchReconciliation> {
+  reconcileBatch(context: BatchContext): Promise<BatchReconciliation> {
+    return this.withBatchState(() => this.reconcileQueuedBatch(context));
+  }
+
+  private async reconcileQueuedBatch(context: BatchContext): Promise<BatchReconciliation> {
     let locks: SkillLock[] = [];
     try {
       locks = await acquireSkillLocks(this.skillRoot, [this.queueLockName(context.queueId)]);

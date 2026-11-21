@@ -54,7 +54,7 @@ describe("public listing", () => {
       const text = readFileSync(resolve(root, file), "utf8");
       for (const phrase of ["10 unique tool calls", "completed turn", "existing skill", "nothing_to_save",
         "Self-improvement review", "Review provider", "Review model", "None", "22.13.0", "0.16.0-beta.2",
-        "credentials", "cost", "secrets", "OpenCode", "120,000", "normal tool permissions",
+        "credentials", "cost", "secrets", "captured skill-file text", "120,000", "normal tool permissions", "submit_review", "same running reviewer", "no freeform JSON fallback",
         "writes", "~/.agents/skills/", "curator.sqlite", ".paseo-curator/", "created_by: paseo-curator"])
         expect(text, `${file} must explain ${phrase}`).toContain(phrase);
       expect(text).toMatch(/only to (?:the )?plugin.applied/i);

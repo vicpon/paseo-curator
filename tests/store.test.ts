@@ -66,6 +66,87 @@ describe("CuratorStore", () => {
       expect(store.listAudit().map(a => a.outcome)).toEqual(["nothing_to_save"]);
       store.close();
     });
+    it("preserves distinct repaired submissions and later rollback failure while deduplicating identical rejection", () => {
+      const store = new CuratorStore(":memory:");
+      try {
+        const row = store.enqueue("source", "turn")!;
+        const claim = store.claim(row.id)!;
+        const first = { queueId: row.id, sourceAgentId: "source", turnId: "turn", outcome: "rejected" as const,
+          summary: "batch rejected", operationCount: 1, operationsHash: "a".repeat(64), skillNames: ["alpha"],
+          rejectionReason: "apply outcome: rejected; oldText not found" };
+        const repaired = { ...first, operationCount: 2, operationsHash: "b".repeat(64), skillNames: ["alpha", "beta"],
+          rejectionReason: "apply outcome: rejected; exact text mismatch" };
+        const partial = { ...repaired, rejectionReason: "apply outcome: rollback_failed; reconciliation required" };
+        for (const audit of [first, repaired, partial, partial]) {
+          expect(store.recordAuditIfClaimCurrent(row.id, claim.attempts, audit)).toBe(true);
+        }
+        const audits = store.listAudit();
+        expect(audits).toHaveLength(3);
+        expect(audits.map(({ id: _id, timestamp: _timestamp, ...audit }) => audit)).toEqual([first, repaired, partial]);
+        expect(store.fail(row.id, "rollback failed; reconciliation required", claim.attempts)).toBe(true);
+        expect(store.recordAuditIfClaimCurrent(row.id, claim.attempts, { ...partial, operationsHash: "c".repeat(64) })).toBe(false);
+        expect(store.listAudit()).toEqual(audits);
+      } finally { store.close(); }
+    });
+
+    it("keeps success outcome audits idempotent even if a caller supplies another batch hash", () => {
+      const store = new CuratorStore(":memory:");
+      try {
+        for (const outcome of ["applied", "nothing_to_save"] as const) {
+          const audit = { queueId: "terminal", sourceAgentId: "source", turnId: "turn", outcome,
+            summary: "terminal outcome", operationCount: 0, operationsHash: "a".repeat(64), skillNames: [] };
+          store.recordAudit(audit);
+          store.recordAudit({ ...audit, operationsHash: "b".repeat(64) });
+        }
+        expect(store.listAudit().map(row => [row.outcome, row.operationsHash])).toEqual([
+          ["applied", "a".repeat(64)], ["nothing_to_save", "a".repeat(64)],
+        ]);
+      } finally { store.close(); }
+    });
+
+    it("upgrades v2 audit uniqueness without rewriting records or migration history across SQLite reopens", () => {
+      const dbPath = `${process.env.TMPDIR ?? "/tmp"}/curator-audit-v3-${Date.now()}-${Math.random()}.sqlite`;
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations VALUES (1,'2040-01-01'),(2,'2040-01-02');
+        CREATE TABLE audit_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, queue_id TEXT NOT NULL, source_agent_id TEXT NOT NULL,
+          turn_id TEXT NOT NULL, outcome TEXT NOT NULL CHECK(outcome IN ('applied','rejected','nothing_to_save')),
+          summary TEXT NOT NULL, operation_count INTEGER NOT NULL, operations_hash TEXT NOT NULL,
+          skill_names_json TEXT NOT NULL, rejection_reason TEXT, created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX audit_log_terminal_outcome ON audit_log(queue_id,outcome);
+        INSERT INTO audit_log VALUES
+          (17,'q-rejected','source','turn','rejected','first rejection',1,'${"a".repeat(64)}','["alpha"]','oldText mismatch','2040-01-01'),
+          (18,'q-applied','source','turn-2','applied','batch applied',1,'${"b".repeat(64)}','["alpha"]',NULL,'2040-01-02'),
+          (19,'q-nothing','source','turn-3','nothing_to_save','nothing to save',0,'${"c".repeat(64)}','[]',NULL,'2040-01-03');
+      `);
+      const original = legacy.prepare("SELECT * FROM audit_log ORDER BY id").all();
+      legacy.close();
+      let store = new CuratorStore(dbPath);
+      try {
+        store.recordAudit({ queueId: "q-rejected", sourceAgentId: "source", turnId: "turn", outcome: "rejected",
+          summary: "batch rejected", operationCount: 2, operationsHash: "d".repeat(64), skillNames: ["alpha", "beta"],
+          rejectionReason: "apply outcome: rollback_failed; reconciliation required" });
+        const expected = store.listAudit();
+        expect(expected).toHaveLength(4);
+        for (let i = 0; i < 2; i++) {
+          store.close();
+          store = new CuratorStore(dbPath);
+          expect(store.listAudit()).toEqual(expected);
+        }
+        const inspect = new DatabaseSync(dbPath);
+        try {
+          expect(inspect.prepare("SELECT * FROM audit_log WHERE id <= 19 ORDER BY id").all()).toEqual(original);
+          expect(inspect.prepare("SELECT version, applied_at FROM schema_migrations WHERE version IN (1,2) ORDER BY version").all()).toEqual([
+            { version: 1, applied_at: "2040-01-01" }, { version: 2, applied_at: "2040-01-02" },
+          ]);
+          expect(inspect.prepare("SELECT version FROM schema_migrations ORDER BY version").all()).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+        } finally { inspect.close(); }
+      } finally { store.close(); rmSync(dbPath, { force: true }); }
+    });
+
     it("migrates legacy audit rows and backfills observed queued turns", () => {
       const dbPath = `${process.env.TMPDIR ?? "/tmp"}/curator-legacy-${Date.now()}-${Math.random()}.sqlite`;
       const legacy = new DatabaseSync(dbPath);
