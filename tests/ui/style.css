@@ -1,0 +1,17 @@
+:root { font: 15px/1.5 system-ui, sans-serif; color: #e4e4e7; background: #18181b; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 780px; padding: 28px 24px; margin: auto; }
+aside { font-size: 12px; color: #b4b4bd; margin-bottom: 28px; }
+h1 { font-size: 24px; margin: 0 0 12px; }
+p { color: #b4b4bd; margin: 8px 0 0; overflow-wrap: anywhere; }
+section > p { margin-bottom: 24px; }
+.row { padding: 18px 0; border-top: 1px solid #3f3f46; }
+label, .line { display: flex; gap: 12px; justify-content: space-between; align-items: center; font-weight: 600; }
+select, button { font: inherit; border: 1px solid #52525b; border-radius: 6px; padding: 8px 12px; background: #27272a; color: #e4e4e7; max-width: 60%; }
+button { cursor: pointer; }
+button:hover:enabled { background: #3f3f46; }
+button:disabled { color: #b4b4bd; cursor: default; }
+:focus-visible { outline: 2px solid #93c5fd; outline-offset: 3px; }
+::selection { background: #1d4ed8; color: #fff; }
+@media (max-width: 480px) { main { padding: 20px 16px; } label { align-items: stretch; flex-direction: column; } select { max-width: 100%; width: 100%; } }

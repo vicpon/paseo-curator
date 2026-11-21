@@ -26,7 +26,6 @@ import { join, resolve } from "node:path";
 import type {
   PluginHookContext,
   PluginHookPayload,
-  PluginLifecycleEvents,
   PluginServerContext,
 } from "@getpaseo/plugin/server";
 import { curatorSettings } from "./shared/settings";
@@ -35,20 +34,13 @@ import { curatorSettings } from "./shared/settings";
 import { CuratorOrchestrator, type SkillSummary } from "./server/orchestrator";
 import { PaseoAdapter, type PaseoApiRef, type SourceAgent, type RoutingSettings } from "./server/paseo-adapter";
 import { CuratorStore } from "./server/store";
+import { ReviewTools } from "./server/review-tools";
 import { SkillManager } from "./server/skill-manager";
 import { parseFrontmatter } from "./server/skill-files";
 import type { PluginConfig } from "./server/contracts";
 import { ReconciliationRunner } from "./server/reconciliation";
 import { MaintenanceRunner } from "./server/maintenance";
 import { appendCuratorActivity } from "./server/activity";
-import {
-  clearRegisteredCuratorAgentIds,
-  isRegisteredCuratorAgentId,
-  registerCuratorAgentId as registerCuratorAgentIdForPermissionGuard,
-} from "./server/curator-agents";
-
-export { registerCuratorAgentIdForPermissionGuard };
-
 type PaseoApi = PluginHookContext["paseo"];
 
 /** Metadata key marking a curator-created agent so it is excluded from its own trigger. */
@@ -63,26 +55,6 @@ export const CURATOR_AGENT_METADATA_KEY = "paseo.curator";
  */
 export function isCuratorAgent(metadata: Record<string, unknown>): boolean {
   return metadata[CURATOR_AGENT_METADATA_KEY] === true;
-}
-
-/** Deny every approval-gated action from curator agents. */
-export async function handleCuratorPermissionRequested(
-  event: PluginLifecycleEvents["agent.permission_requested"],
-  context: PluginHookContext,
-): Promise<void> {
-  if (!isRegisteredCuratorAgentId(event.agent.id)) return;
-  const agent = context.paseo.agents.ref(event.agent.id);
-  try {
-    await agent.respondToPermission({
-      requestId: event.request.id,
-      response: {
-        behavior: "deny",
-        message: "Curator agents cannot mutate files or run approval-gated tools.",
-      },
-    });
-  } catch {
-    // Permission denial is best effort and must not fail the plugin hook.
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -416,12 +388,12 @@ function safeLstat(path: string) {
 export function createProductionRuntime(
   paseo: PaseoApi,
   config: PluginConfig = DEFAULT_PLUGIN_CONFIG,
-  options: { stateDir?: string; settings?: RoutingSettings } = {},
+  options: { stateDir?: string; settings?: RoutingSettings; reviewTools?: ReviewTools } = {},
 ): CuratorRuntime {
   const skillRoot = expandHome(config.skillRoot);
   // `PaseoApiRef` mirrors the real `PaseoApi` for exactly the surface the
   // adapter consumes; cast through `unknown` (type-only SDK import, no `any`).
-  const adapter = new PaseoAdapter(paseo as unknown as PaseoApiRef, options.settings);
+  const adapter = new PaseoAdapter(paseo as unknown as PaseoApiRef, options.settings, options.reviewTools);
 
   const stateDir = options.stateDir ?? expandHome(STATE_DIR);
   mkdirSync(stateDir, { recursive: true });
@@ -589,17 +561,7 @@ export function createProductionRuntime(
 
 export default function contribute(server: PluginServerContext): () => Promise<void> {
   const settings = server.registerSettings(curatorSettings);
-  const removePermissionGuard = server.on(
-    "agent.permission_requested",
-    handleCuratorPermissionRequested,
-  );
-  const cleanupRuntime = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo, DEFAULT_PLUGIN_CONFIG, { settings }));
-  return async () => {
-    try {
-      await cleanupRuntime();
-    } finally {
-      removePermissionGuard();
-      clearRegisteredCuratorAgentIds();
-    }
-  };
+  const reviewTools = new ReviewTools(server);
+  const cleanup = registerCuratorHook(server, (paseo) => createProductionRuntime(paseo, DEFAULT_PLUGIN_CONFIG, { settings, reviewTools }));
+  return async () => { await cleanup(); await reviewTools.close(); };
 }

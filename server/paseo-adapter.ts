@@ -2,8 +2,11 @@ import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { buildToolCallDisplayModel } from "@getpaseo/protocol/tool-call-display";
 import { createHash } from "node:crypto";
 
-import type { TimelineEntry } from "./review-prompt";
-import { registerCuratorAgentId } from "./curator-agents";
+import { buildSkillFileContext, type ReviewPromptInput, type TimelineEntry } from "./review-prompt";
+import type { RoutingProviders, ReviewConfig } from "../shared/routing";
+import { REVIEW_TIMEOUT_MS, type SubmissionHandler } from "./review-submission";
+import type { ReviewTools } from "./review-tools";
+import { routingSettingsSchema } from "../shared/settings";
 
 // ---------------------------------------------------------------------------
 // Paseo API surface
@@ -47,28 +50,19 @@ export interface PaseoApiRef {
     };
     readonly create: (options: CreateAgentOptions) => Promise<AgentHandle>;
   };
-  readonly providers?: {
-    readonly waitForReady: (options?: { timeoutMs?: number }) => Promise<{
-      readonly providers: ReadonlyArray<{ readonly id: string; readonly available: boolean }>;
-    }>;
-    readonly listModes: (provider: string) => Promise<{
-      readonly modes: ReadonlyArray<{ readonly id: string; readonly label: string }>;
-    }>;
-    readonly listModels: (provider: string) => Promise<{
-      readonly models: ReadonlyArray<{ readonly id: string; readonly label: string; readonly isDefault?: boolean }>;
-    }>;
-  };
+  readonly providers?: RoutingProviders;
 }
 
 interface CuratorRoute {
-  providerSelection: string;
-  modeId: string;
+  config: ReviewConfig;
+  consent?: { fallbackProvider: string; fallbackModel?: string; revision?: string };
 }
 
 export interface RoutingSettings {
   read(): Promise<{
     status: "ready" | "invalid";
-    values?: { fallbackProvider?: string };
+    revision?: string;
+    values?: { fallbackProvider?: string; fallbackModel?: string };
   }>;
 }
 
@@ -146,10 +140,10 @@ export interface RecoveredCompletedTurn {
  */
 export interface CreateAgentOptions {
   readonly agentId: string;
-  readonly config: { readonly provider: string; readonly modeId?: string };
+  readonly config: ReviewConfig;
   readonly cwd: string;
   readonly parent: string;
-  readonly prompt: string;
+  readonly prompt?: string;
   readonly background: boolean;
   readonly idempotencyKey: string;
   readonly title: string;
@@ -160,6 +154,9 @@ export interface CreateAgentOptions {
 /** A handle on a created agent: its id and the terminal-state waiter. */
 export interface AgentHandle {
   readonly id: string;
+  readonly capabilities?: { supportsMcpServers: boolean; supportsToolInvocations: boolean } | null;
+  readonly run?: (prompt: string, options?: { timeoutMs?: number }) => Promise<WaitForFinishResult>;
+  readonly archive?: () => Promise<unknown>;
   readonly waitForFinish: (timeoutMs?: number) => Promise<WaitForFinishResult>;
 }
 
@@ -283,42 +280,42 @@ export class PaseoAdapter {
   constructor(
     private readonly paseo: PaseoApiRef,
     private readonly settings?: RoutingSettings,
+    private readonly reviewTools?: ReviewTools,
   ) {}
 
-  private async restrictedMode(providerId: string): Promise<string | null> {
-    // Codex read-only sets a native read-only sandbox; labels and approval hooks alone do not.
-    if (providerId !== "codex" || !this.paseo.providers) return null;
+  private async providerEnabled(provider: string): Promise<boolean> {
     try {
-      const { modes } = await this.paseo.providers.listModes(providerId);
-      return modes.some(mode => mode.id === "read-only") ? "read-only" : null;
-    } catch {
-      return null;
-    }
+      const snapshot = await this.paseo.providers?.waitForReady({ timeoutMs: 10_000 });
+      return snapshot?.entries.some(entry => entry.provider === provider && entry.enabled && entry.status === "ready") ?? false;
+    } catch { return false; }
+  }
+
+  private async sourceRoute(selection: string | null): Promise<CuratorRoute | null> {
+    if (!selection || !this.paseo.providers || !await this.providerEnabled(selection.split("/")[0])) return null;
+    return { config: { provider: selection } };
   }
 
   private async resolveFallbackProvider(): Promise<CuratorRoute | null> {
-    const providerId = await this.readFallbackSetting();
-    if (!providerId || !this.paseo.providers) return null;
-    const modeId = await this.restrictedMode(providerId);
-    if (!modeId) return null;
+    const consent = await this.readFallbackSetting();
+    if (!consent || !this.paseo.providers || !await this.providerEnabled(consent.fallbackProvider)) return null;
     try {
-      const { models } = await this.paseo.providers.listModels(providerId);
-      const model = models.find(model => model.isDefault)?.id ?? models[0]?.id;
+      const { models, error } = await this.paseo.providers.listModels(consent.fallbackProvider);
+      if (error) return null;
+      const model = consent.fallbackModel === undefined
+        ? models?.find(model => model.isDefault)?.id ?? models?.[0]?.id
+        : models?.find(model => model.id === consent.fallbackModel)?.id;
       if (!model) return null;
-      return { providerSelection: `${providerId}/${model}`, modeId };
-    } catch {
-      return null;
-    }
+      return { config: { provider: `${consent.fallbackProvider}/${model}` }, consent };
+    } catch { return null; }
   }
 
-  private async readFallbackSetting(): Promise<string | undefined> {
+  private async readFallbackSetting(): Promise<CuratorRoute["consent"]> {
     try {
       const state = await this.settings?.read();
-      return state?.status === "ready" && state.values?.fallbackProvider === "codex"
-        ? state.values.fallbackProvider : undefined;
-    } catch {
-      return undefined;
-    }
+      const values = state?.status === "ready" ? routingSettingsSchema.safeParse(state.values) : null;
+      return values?.success && values.data.fallbackProvider
+        ? { fallbackProvider: values.data.fallbackProvider, ...(values.data.fallbackModel ? { fallbackModel: values.data.fallbackModel } : {}), ...(state?.revision ? { revision: state.revision } : {}) } : undefined;
+    } catch { return undefined; }
   }
 
   async listLoadedSkillNames(agentId: string): Promise<string[]> {
@@ -533,97 +530,96 @@ export class PaseoAdapter {
     }
   }
 
-  /**
-   * Create a curator agent for a completed turn, wait for it to finish, and
-   * return the curator's id and final text.
-   *
-   * Success is exactly: the create resolves, a single `waitForFinish` call
-   * returns a terminal result of `status: "idle"` with a non-empty
-   * `lastMessage`. Every failure path — a create rejection, a wait
-   * rejection, or an idle result whose `lastMessage` is null or empty —
-   * throws a {@link CuratorRunError} bounded to the source agent id, turn
-   * id, and a safe category. The source agent's prompt is never echoed, and
-   * a thrown provider message is not included in the error text when it may
-   * echo the prompt or model output; the safe category carries the failure.
-   */
+  /** Open with an identity-bound tool before sending source data. Prose is display-only. */
   async runCurator(
     sourceAgent: SourceAgent,
     turnId: string,
     prompt: string,
     reviewId?: string,
+    skillFiles?: ReviewPromptInput["skillFiles"],
+    submit?: SubmissionHandler,
   ): Promise<CuratorRunResult> {
+    if (!this.reviewTools || !submit || !reviewId) throw curatorError(sourceAgent.id, turnId, "structured-tool-injection-unavailable");
     const provider = sourceAgent.provider.trim();
-    const providerId = provider.split("/")[0];
     const selection = provider.includes("/") ? provider
       : sourceAgent.model?.trim() ? `${provider}/${sourceAgent.model.trim()}` : null;
-    const modeId = selection ? await this.restrictedMode(providerId) : null;
-    let route: CuratorRoute | null = selection && modeId ? { providerSelection: selection, modeId } : null;
-    let usedFallback = false;
-    if (!route) {
-      route = await this.resolveFallbackProvider();
-      usedFallback = true;
-    }
+    let route = await this.sourceRoute(selection);
+    if (!route) route = await this.resolveFallbackProvider();
     if (!route) throw curatorError(sourceAgent.id, turnId, "source-model-unavailable");
 
-    const create = async (selected: CuratorRoute, fallback: boolean) => {
-      if (fallback && await this.readFallbackSetting() !== selected.providerSelection.split("/")[0]) {
+    const create = async (selected: CuratorRoute) => {
+      // Re-check after every asynchronous lookup, immediately before sending the prompt.
+      if (!await this.providerEnabled(selected.config.provider.split("/")[0])) {
+        throw curatorError(sourceAgent.id, turnId, "provider-unavailable");
+      }
+      if (selected.consent && JSON.stringify(await this.readFallbackSetting()) !== JSON.stringify(selected.consent)) {
         throw curatorError(sourceAgent.id, turnId, "fallback-unavailable");
       }
-      const routeKey = `${selected.providerSelection}:${selected.modeId}`;
+      const routeKey = `${selected.config.provider}:${createHash("sha256").update(JSON.stringify(selected.config)).digest("hex").slice(0, 16)}`;
       const reviewKey = reviewId === undefined ? turnId : JSON.stringify([turnId, reviewId]);
       const agentId = deriveCuratorAgentId(sourceAgent.id, `${reviewKey}:${routeKey}`);
-      const unregister = registerCuratorAgentId(agentId);
+      const binding = this.reviewTools!.bind({ agentId, provider: selected.config.provider, cwd: sourceAgent.cwd,
+        sourceAgentId: sourceAgent.id, turnId, reviewId, submit,
+        authorized: async () => await this.providerEnabled(selected.config.provider.split("/")[0])
+          && (!selected.consent || JSON.stringify(await this.readFallbackSetting()) === JSON.stringify(selected.consent)),
+      });
       try {
         const handle = await this.paseo.agents.create({
           agentId,
-          config: { provider: selected.providerSelection, modeId: selected.modeId },
+          config: selected.config,
           cwd: sourceAgent.cwd,
           parent: sourceAgent.id,
-          prompt,
           background: true,
           idempotencyKey: `paseo-curator:${sourceAgent.id}:${reviewKey}:${routeKey}`,
           title: `Curator: ${sourceAgent.id} / ${turnId}`,
           labels: { "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
           metadata: { "paseo.curator": true, "paseo.sourceAgent": sourceAgent.id, "paseo.turnId": turnId },
         });
-        if (handle.id !== agentId) throw new Error("curator identity mismatch");
-        return { handle, unregister };
-      } catch {
-        unregister();
+        if (handle.id !== agentId) throw curatorError(sourceAgent.id, turnId, "curator-identity-mismatch");
+        // Discover the actual opened session's capabilities before sending source data.
+        if (!binding.attached || !handle.run || handle.capabilities?.supportsMcpServers !== true
+          || handle.capabilities.supportsToolInvocations !== true) {
+          await handle.archive?.().catch(() => undefined);
+          throw curatorError(sourceAgent.id, turnId, "structured-tool-injection-unavailable");
+        }
+        return { handle, binding, selected };
+      } catch (error) {
+        await binding.close();
+        if (error instanceof CuratorRunError) throw error;
         throw curatorError(sourceAgent.id, turnId, "create-failed");
       }
     };
 
     let created: Awaited<ReturnType<typeof create>>;
     try {
-      created = await create(route, usedFallback);
-    } catch {
-      const fallback = usedFallback ? null : await this.resolveFallbackProvider();
-      if (!fallback || fallback.providerSelection === route.providerSelection) {
-        throw curatorError(sourceAgent.id, turnId, "create-failed");
+      created = await create(route);
+    } catch (error) {
+      if (error instanceof CuratorRunError && !error.message.endsWith("create-failed") && !error.message.endsWith("structured-tool-injection-unavailable")) throw error;
+      const fallback = route.consent ? null : await this.resolveFallbackProvider();
+      if (!fallback || fallback.config.provider === route.config.provider) {
+        throw error;
       }
-      created = await create(fallback, true);
+      created = await create(fallback);
     }
-    const { handle, unregister: unregisterCurator } = created;
-
-    let result: WaitForFinishResult;
+    const { handle, binding, selected } = created;
     try {
-      // A single wait; the fixed timeout bounds the wait if the provider
-      // ever stalls before reporting a terminal state.
-      result = await handle.waitForFinish(CURATOR_WAIT_TIMEOUT_MS);
-    } catch {
+      if (!await this.providerEnabled(selected.config.provider.split("/")[0])) throw curatorError(sourceAgent.id, turnId, "provider-unavailable");
+      if (selected.consent && JSON.stringify(await this.readFallbackSetting()) !== JSON.stringify(selected.consent)) {
+        throw curatorError(sourceAgent.id, turnId, "fallback-unavailable");
+      }
+      const result = await handle.run!(`${prompt}\n\n${buildSkillFileContext(skillFiles ?? [])}`, { timeoutMs: REVIEW_TIMEOUT_MS });
+      if (result.status !== "idle") {
+        if (result.status === "timeout" || result.status === "permission") await handle.archive?.().catch(() => undefined);
+        throw curatorError(sourceAgent.id, turnId, `terminal-status:${result.status}`);
+      }
+      // Final assistant text is display-only. Durable success comes from the tool.
+      return { curatorAgentId: handle.id, finalText: "" };
+    } catch (error) {
+      if (error instanceof CuratorRunError) throw error;
       throw curatorError(sourceAgent.id, turnId, "wait-failed");
+    } finally {
+      await binding.close();
     }
-
-    if (result.status === "idle" || result.status === "error") {
-      unregisterCurator();
-    }
-
-    if (result.status !== "idle" || result.lastMessage === null || result.lastMessage === "") {
-      throw curatorError(sourceAgent.id, turnId, `terminal-status:${result.status}`);
-    }
-
-    return { curatorAgentId: handle.id, finalText: result.lastMessage };
   }
 
   private finish(
@@ -691,12 +687,6 @@ function describeThrown(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 
-/**
- * Fixed `waitForFinish` timeout for the curator run. Bounds the wait if the
- * provider ever stalls before reporting a terminal state; the terminal
- * result it produces is still validated before being accepted.
- */
-const CURATOR_WAIT_TIMEOUT_MS = 300_000;
 
 function deriveCuratorAgentId(sourceAgentId: string, turnId: string): string {
   const chars = createHash("sha256")
