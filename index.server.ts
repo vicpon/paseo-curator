@@ -505,6 +505,7 @@ export function createProductionRuntime(
       await maintenance.runOnce().catch(() => "ran" as const);
     }
     reconciliationTimer = setInterval(() => {
+      try { store.pruneCapturedTurns(); } catch { /* retry next tick; reads also enforce expiry */ }
       void reconciliation.runOnce().catch(() => { /* contained */ });
     }, 5 * 60 * 1_000);
     unrefTimer(reconciliationTimer);

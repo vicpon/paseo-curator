@@ -74,9 +74,8 @@ export interface SourceAgent {
   /**
    * The source agent's model id (e.g. `ai3/qwen/qwen3.8-27b`), when known.
    * Optional: the lifecycle hook payload does not carry it. The daemon
-   * snapshot (timeline refetch or agent listing) is authoritative and the
-   * orchestrator always re-reads the turn before running the curator, so the
-   * curator path normally has it.
+   * snapshot (timeline refetch or agent listing) is authoritative. A durable
+   * completion-time capture preserves that turn's model for delayed review.
    */
   readonly model?: string | null;
 }
@@ -180,6 +179,8 @@ export interface WholeTurnRead {
   readonly model: string | null;
   readonly cwd: string;
   readonly entries: TimelineEntry[];
+  /** Original entry count when entries is a bounded durable capture. */
+  readonly totalEntries?: number;
   readonly toolIterations: number;
   readonly usedSkillNames: string[];
 }
@@ -192,7 +193,7 @@ export interface WholeTurnRead {
  * from transcript content.
  */
 export class TurnReadError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly reason: "turn-not-found" | "transient" = "transient") {
     super(message);
     this.name = "TurnReadError";
   }
@@ -210,7 +211,7 @@ function boundedError(
     0,
     MAX_ERROR_MESSAGE_CHARS,
   );
-  return new TurnReadError(message);
+  return new TurnReadError(message, cause.startsWith("turn not found:") ? "turn-not-found" : "transient");
 }
 
 // ---------------------------------------------------------------------------

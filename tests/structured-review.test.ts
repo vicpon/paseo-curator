@@ -156,6 +156,54 @@ describe("structured review durable protocol", () => {
     expect(readFileSync(f.path, "utf8")).toBe("Corrected");
   });
 
+  it("reports remaining repairs and stops promising another repair on the fourth malformed call", async () => {
+    const replies: Reply[] = [];
+    let fifth: Reply | undefined;
+    const f = fixture(async submit => {
+      for (let call = 1; call <= 4; call++) replies.push(await submit({ ...noop, operations: "[]" }, allowed));
+      fifth = await submit(noop, allowed);
+    });
+    await f.orchestrator.processPending();
+    expect(replies).toHaveLength(4);
+    for (const [index, reply] of replies.entries()) {
+      expect(reply).toMatchObject({ isError: true, structuredContent: {
+        accepted: false, retryable: index < 3, remainingSubmissions: 3 - index,
+        expected: { operations: "JSON array of operation objects, never a JSON-encoded string" },
+        example: { summary: "No reusable lesson", outcome: "nothing_to_save", operations: [] },
+      } });
+      if (index === 3) {
+        expect(reply.text).not.toContain("Resubmit in this same run");
+        expect(reply.text).toContain("No submissions remain in this review");
+      } else {
+        expect(reply.text).toContain("Resubmit in this same run");
+        expect(reply.text).toContain(`${3 - index} submissions remain.`);
+      }
+    }
+    expect(fifth?.text).toContain("repair budget exhausted");
+    expect(f.store.get("source", "turn")?.status).toBe("failed");
+    expect(f.store.listAudit()).toHaveLength(0);
+  });
+
+  it("keeps authorization first and accepted duplicates idempotent after the fourth submission", async () => {
+    const replies: Reply[] = [];
+    const f = fixture(async submit => {
+      replies.push(await submit(patch(), async () => false));
+      for (let call = 0; call < 3; call++) replies.push(await submit({ ...noop, operations: "[]" }, allowed));
+      replies.push(await submit(patch(), allowed));
+      replies.push(await submit(patch(), allowed));
+      replies.push(await submit(patch(), async () => false));
+    });
+    await f.orchestrator.processPending();
+    expect(replies).toHaveLength(7);
+    expect(replies[0].text).toContain("authorization revoked");
+    expect(replies[4]).toMatchObject({ structuredContent: { accepted: true } });
+    expect(replies[5]).toEqual(replies[4]);
+    expect(replies[6].text).toContain("authorization revoked");
+    expect(f.store.get("source", "turn")?.status).toBe("applied");
+    expect(f.store.listAudit().filter(a => a.outcome === "applied")).toHaveLength(1);
+    expect(readFileSync(f.path, "utf8")).toBe("Corrected");
+  });
+
   it("bounds invalid-argument repairs to four submissions in the same review", async () => {
     const f = fixture(async submit => {
       for (let i = 0; i < 4; i++) expect((await submit({ outcome: "bad" }, allowed)).isError).toBe(true);

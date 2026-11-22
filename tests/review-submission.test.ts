@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SubmissionToolInput, validateSubmission } from "../server/review-submission";
+import { SubmissionArgumentContract, SubmissionToolInput, validateSubmission } from "../server/review-submission";
 const noop = { summary: "No reusable lesson", outcome: "nothing_to_save", operations: [] };
 const saved = { summary: "Reusable lesson", outcome: "saved", operations: [{ type: "patch", skillName: "alpha", path: "SKILL.md", oldText: "old", newText: "new" }] };
 
@@ -31,4 +31,21 @@ describe("submission arguments, never prose extraction", () => {
     // so strict validation and budget accounting happen inside the callback.
     expect(validateSubmission(await SubmissionToolInput.parseAsync(input)).ok).toBe(false);
   });
+});
+
+it.each(["[]", "[{\"type\":\"create\"}]", 1, false, null, {}, { type: "create" }])("explains native operations arrays for %j without coercion", operations => {
+  const result = validateSubmission({ ...noop, operations });
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.feedback).toContain("JSON array");
+    expect(result.feedback).toContain('"operations":[]');
+    expect(result.feedback).toContain("never a JSON-encoded string");
+  }
+});
+
+it("advertises only review operations, excluding maintenance-only archive", () => {
+  const contract = JSON.parse(SubmissionArgumentContract);
+  expect(contract.properties.operations.items.oneOf.map((option: { properties: { type: { const: string } } }) => option.properties.type.const)).toEqual([
+    "create", "patch", "write_file", "remove_file",
+  ]);
 });

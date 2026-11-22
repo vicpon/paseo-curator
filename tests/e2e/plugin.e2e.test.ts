@@ -2,7 +2,8 @@ import { reviewHost } from "../review-host";
 import { routingSnapshot, routingModels, routingControls } from "../routing-fixtures";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { describe, expect, it, vi } from "vitest";
 import { createProductionRuntime } from "../../index.server";
 import { makeTempRoot, cleanupRoot, createSkill, skillMd } from "../fixtures";
 import type { PluginConfig } from "../../server/contracts";
@@ -12,6 +13,40 @@ import { CuratorOrchestrator } from "../../server/orchestrator";
 import { PaseoAdapter, type CreateAgentOptions } from "../../server/paseo-adapter";
 
 const roots: string[] = [];
+
+it("contains retention pruning failures and reconciles again after a SQLite writer releases its lock", async () => {
+  vi.useFakeTimers();
+  const root = makeTempRoot("curator-pruning-lock");
+  let discoveries = 0;
+  const paseo = { agents: { list: async () => {
+    discoveries++;
+    return { entries: [], pageInfo: {} };
+  } } };
+  const config: PluginConfig = {
+    skillRoot: join(root, "skills"), reviewThreshold: 10, curatorConcurrency: 1,
+    maxOperations: 20, maintenanceEnabled: false, consolidationEnabled: false,
+    staleDays: 14, archiveDays: 30, maxRetries: 3,
+  };
+  const runtime = createProductionRuntime(paseo as never, config, { stateDir: root });
+  const writer = new DatabaseSync(join(root, "curator.sqlite"));
+  try {
+    await runtime.start();
+    expect(discoveries).toBe(1);
+    writer.exec("BEGIN IMMEDIATE");
+    expect(() => vi.advanceTimersByTime(5 * 60 * 1000)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(discoveries).toBe(2);
+    writer.exec("ROLLBACK");
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(discoveries).toBe(3);
+  } finally {
+    try { writer.exec("ROLLBACK"); } catch { /* already released */ }
+    writer.close();
+    await runtime.close();
+    vi.useRealTimers();
+    cleanupRoot(root);
+  }
+});
 
 async function waitForFile(path: string): Promise<void> {
   for (let i = 0; i < 100; i += 1) {
