@@ -9,7 +9,16 @@ import { routingSnapshot, routingModels } from "./routing-fixtures";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-it.each([false, true])("real Paseo hook + MCP + PluginAgentTools schema repairs, budget exhausted=%s", async exhausted => {
+it.each([
+  { exhausted: false, operations: "[]" },
+  { exhausted: false, operations: '[{"type":"create","skillName":"canary","content":"safe fixture"}]' },
+  { exhausted: false, operations: 1 },
+  { exhausted: false, operations: false },
+  { exhausted: false, operations: null },
+  { exhausted: false, operations: { type: "create", skillName: "canary" } },
+  { exhausted: false, operations: [1] },
+  { exhausted: true, operations: "[]" },
+])("real Paseo hook + MCP + PluginAgentTools schema repairs: %j", async ({ exhausted, operations }) => {
   const root = makeTempRoot("host-integration");
   createSkill(root, "canary", skillMd("canary", "Original"));
   const store = new CuratorStore(join(root, "queue.sqlite"), { maxRetries: 1 });
@@ -29,14 +38,15 @@ it.each([false, true])("real Paseo hook + MCP + PluginAgentTools schema repairs,
       expect(unauthorized.isError).toBe(true);
       expect(opened.tools[0].name).toBe("submit_review");
       expect(opened.tools[0].inputSchema).toMatchObject({ type: "object", properties: { operations: { description: expect.any(String) } } });
+      expect(JSON.stringify(opened.tools[0].inputSchema)).toContain('"type":"array"');
       const mcp = await reviewMcpBridge(host, options, opened);
       return { id: options.agentId, capabilities: { supportsMcpServers: true, supportsToolInvocations: true },
         waitForFinish: async () => { throw new Error("must use run after discovery"); },
         run: async () => {
           runs++;
-          replies.push(await mcp.call({ outcome: "saved", operations: "invalid-secret" }));
+          replies.push(await mcp.call({ outcome: "saved", operations }));
           if (exhausted) {
-            for (let i = 0; i < 3; i++) replies.push(await mcp.call({ outcome: "saved", operations: "invalid-secret" }));
+            for (let i = 0; i < 3; i++) replies.push(await mcp.call({ outcome: "saved", operations }));
             replies.push(await mcp.call({ summary: "No lesson", outcome: "nothing_to_save", operations: [] }));
             await mcp.close();
             return { status: "idle", final: null, error: null, lastMessage: "ignored" };
@@ -64,7 +74,11 @@ it.each([false, true])("real Paseo hook + MCP + PluginAgentTools schema repairs,
       expect(readFileSync(join(root, "canary", "SKILL.md"), "utf8")).toContain("Original");
       return;
     }
-    expect(JSON.stringify(replies[0])).toContain("schema");
+    expect(replies[0]).toMatchObject({ structuredContent: {
+      accepted: false, retryable: true, expected: { operations: "JSON array of operation objects, never a JSON-encoded string" },
+      example: { summary: "No reusable lesson", outcome: "nothing_to_save", operations: [] },
+    } });
+    expect(JSON.stringify(replies[0])).toContain('"operations":[]');
     expect(JSON.stringify(replies[0])).not.toContain("invalid-secret");
     expect(replies[1]).toMatchObject({ structuredContent: { accepted: true } });
     expect(runs).toBe(1);

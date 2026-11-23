@@ -142,7 +142,7 @@ describe("CuratorStore", () => {
           expect(inspect.prepare("SELECT version, applied_at FROM schema_migrations WHERE version IN (1,2) ORDER BY version").all()).toEqual([
             { version: 1, applied_at: "2040-01-01" }, { version: 2, applied_at: "2040-01-02" },
           ]);
-          expect(inspect.prepare("SELECT version FROM schema_migrations ORDER BY version").all()).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+          expect(inspect.prepare("SELECT version FROM schema_migrations ORDER BY version").all()).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
         } finally { inspect.close(); }
       } finally { store.close(); rmSync(dbPath, { force: true }); }
     });
@@ -179,7 +179,7 @@ describe("CuratorStore", () => {
     });
 
     it("persists exact audit outcomes and queue no-op success across real SQLite reopens", () => {
-      const dbPath = `/tmp/curator-audit-${Date.now()}-${Math.random()}.sqlite`;
+      const dbPath = `${process.env.TMPDIR ?? "/tmp"}/curator-audit-${Date.now()}-${Math.random()}.sqlite`;
       let store = new CuratorStore(dbPath);
       try {
         const row = store.enqueue("agent", "turn")!;
@@ -208,7 +208,7 @@ describe("CuratorStore", () => {
     });
 
     it("upgrades restrictive legacy queue and audit CHECK constraints without losing identities", () => {
-      const dbPath = `/tmp/curator-constrained-${Date.now()}-${Math.random()}.sqlite`;
+      const dbPath = `${process.env.TMPDIR ?? "/tmp"}/curator-constrained-${Date.now()}-${Math.random()}.sqlite`;
       const legacy = new DatabaseSync(dbPath);
       legacy.exec(`
         CREATE TABLE queue (

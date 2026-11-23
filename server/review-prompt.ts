@@ -58,6 +58,8 @@ export interface ReviewPromptInput {
   turnId: string;
   /** The bounded timeline snapshot for the turn. */
   entries: TimelineEntry[];
+  /** Original count, preserved when the durable capture omits earlier entries. */
+  totalEntries?: number;
   /** The current skill library index (bounded). */
   skills: SkillSummary[];
   skillFiles?: Array<{ skillName: string; path: string; content: string }>;
@@ -170,7 +172,7 @@ export function buildReviewPrompt(
   const maxEntryChars = bounds?.maxEntryChars ?? DEFAULT_MAX_ENTRY_CHARS;
 
   const { sourceAgentId, turnId, entries, skills } = input;
-  const totalEntries = entries.length;
+  const totalEntries = input.totalEntries ?? entries.length;
 
   // Keep the most recent entries (the "most useful tail").
   const included = entries.slice(-maxEntries);

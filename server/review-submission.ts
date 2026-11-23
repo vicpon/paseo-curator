@@ -1,19 +1,22 @@
 import { z } from "zod";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
-import { ReviewResultSchema } from "./contracts";
+import { ReviewResultSchema, SkillOperationSchema } from "./contracts";
 
 export const SUBMISSION_TOOL_NAME = "submit_review";
 export const MAX_SUBMISSIONS = 4;
 export const REVIEW_TIMEOUT_MS = 300_000;
 export type SubmissionHandler = (input: unknown, authorized: () => Promise<boolean>) => Promise<AgentToolResult>;
 
-export const SubmissionSchema = ReviewResultSchema.extend({ summary: z.string().min(1).max(2000) })
+const reviewOperationOptions = SkillOperationSchema.options.filter(operation => operation.shape.type.value !== "archive");
+const ReviewOperationSchema = z.discriminatedUnion("type", [reviewOperationOptions[0], ...reviewOperationOptions.slice(1)]);
+
+export const SubmissionSchema = ReviewResultSchema.extend({
+  summary: z.string().min(1).max(2000),
+  operations: z.array(ReviewOperationSchema).max(20),
+})
   .superRefine((value, ctx) => {
     if ((value.outcome === "nothing_to_save") !== (value.operations.length === 0)) {
       ctx.addIssue({ code: "custom", path: ["operations"], message: "outcome must agree with operations" });
-    }
-    if (value.operations.some(op => op.type === "archive")) {
-      ctx.addIssue({ code: "custom", path: ["operations"], message: "archive is maintenance only" });
     }
   });
 
@@ -24,7 +27,7 @@ function schemaFeedback(error: { issues: ReadonlyArray<{ path: readonly Property
     const path = issue.path.filter(part => typeof part === "number" || fields.has(String(part))).join("/");
     return `${path || "submission"}: ${issue.code}`;
   });
-  return `schema validation failed (${issues.join("; ")}). Use only summary, outcome, operations; saved requires 1-20 operations; nothing_to_save requires []; archive is maintenance only. Follow the tool schema.`;
+  return `schema validation failed (${issues.join("; ")}). Use only summary, outcome, operations; saved requires 1-20 operations; nothing_to_save requires []; archive is maintenance only. operations must be a JSON array of operation objects, never a JSON-encoded string. Resubmit in this same run. Example: {"summary":"No reusable lesson","outcome":"nothing_to_save","operations":[]}. Shapes: create {type,skillName,content}; patch {type,skillName,path,oldText,newText}; write_file {type,skillName,path,content}; remove_file {type,skillName,path}.`;
 }
 
 // The host's MCP bridge rebuilds a Zod schema from this transport envelope.
@@ -33,7 +36,9 @@ function schemaFeedback(error: { issues: ReadonlyArray<{ path: readonly Property
 export const SubmissionToolInput = z.object({
   summary: z.unknown().optional().describe("Required: a nonempty summary string, at most 2000 characters."),
   outcome: z.unknown().optional().describe("Required: saved or nothing_to_save. nothing_to_save requires operations []."),
-  operations: z.unknown().optional().describe("Required: an array of 1-20 strict skill operations for saved, or [] for nothing_to_save. See the argument contract in the tool description."),
+  operations: z.union([
+    z.array(z.unknown()), z.string(), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()),
+  ]).optional().describe("Required: a native JSON array of 1-20 strict skill operations for saved, or [] for nothing_to_save. Only arrays can be accepted; other transport branches deliver invalid arguments for counted repair feedback. See the argument contract in the tool description."),
 }).passthrough();
 export const SubmissionArgumentContract = JSON.stringify(z.toJSONSchema(SubmissionSchema));
 
@@ -48,8 +53,22 @@ export function validateSubmission(input: unknown):
   return parsed.success ? { ok: true, value: parsed.data } : { ok: false, feedback: schemaFeedback(parsed.error) };
 }
 
-export function submissionError(text: string): AgentToolResult {
-  return { isError: true, text, structuredContent: { accepted: false } };
+export function submissionError(text: string, remainingSubmissions?: number): AgentToolResult {
+  const schemaError = text.startsWith("schema validation failed");
+  if (schemaError && remainingSubmissions === 0) {
+    text = text.replace("Resubmit in this same run.", "No submissions remain in this review; stop submitting.");
+  } else if (schemaError && remainingSubmissions !== undefined && remainingSubmissions > 0) {
+    text += ` ${remainingSubmissions} submissions remain.`;
+  }
+  return { isError: true, text, structuredContent: {
+    accepted: false,
+    ...(schemaError ? {
+      retryable: remainingSubmissions !== 0,
+      ...(remainingSubmissions === undefined ? {} : { remainingSubmissions }),
+      expected: { operations: "JSON array of operation objects, never a JSON-encoded string", schema: JSON.parse(SubmissionArgumentContract) },
+      example: { summary: "No reusable lesson", outcome: "nothing_to_save", operations: [] },
+    } : {}),
+  } };
 }
 
 export function managerFeedback(reason?: string): string {

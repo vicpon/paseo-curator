@@ -12,6 +12,7 @@
     "OVERVIEW.md",
     "OVERVIEW.*.md",
     "docs/routing.md",
+    "docs/review-reliability.md",
     "docs/listing.md",
     "docs/screenshots/README.md",
     "index.client.tsx",

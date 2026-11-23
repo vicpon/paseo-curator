@@ -20,7 +20,9 @@ import type { ReviewSnapshot } from "./skill-manager";
 /** The durable review-queue surface the orchestrator consumes. */
 interface QueueStoreLike {
   getCounter(sourceAgentId: string): number;
-  recordIteration(sourceAgentId: string, iterations: number, turnId: string): boolean;
+  recordIteration(sourceAgentId: string, iterations: number, turnId: string, capturedTurn?: WholeTurnRead): boolean;
+  readCapturedTurn(row: QueueRecord): WholeTurnRead | null;
+  hasCapturedTurn(id: string): boolean;
   claimNext(): QueueRecord | null;
   isClaimCurrent(id: string, claimAttempt: number): boolean;
   recordSkillActivity(
@@ -148,8 +150,8 @@ export interface TurnHandledResult {
  *   awaits curator work, so the host's turn-completion path stays fast.
  *
  * - `processPending` (the drain): single-flight. Concurrent callers share one
- *   drain; the drain claims the oldest pending row (FIFO), re-reads the exact
- *   turn, builds the review prompt, runs the curator with a structured submission tool,
+ *   drain; the drain claims the oldest pending row (FIFO), loads the captured
+ *   exact turn (or refetches legacy history), builds the review prompt, runs the curator with a structured submission tool,
  *   applies accepted operations through the skill manager, and transitions the
  *   row to a terminal state. It loops until no pending rows remain.
  *
@@ -216,7 +218,7 @@ export class CuratorOrchestrator {
 
     // Durably record the turn's iterations; this is the only cadence
     // mutation. It creates a queue row only on a threshold crossing.
-    const enqueued = this.store.recordIteration(agent.id, read.toolIterations, turnId);
+    const enqueued = this.store.recordIteration(agent.id, read.toolIterations, turnId, read);
 
     if (enqueued) {
       // `enqueued` means a queue row is durably present for the turn (fresh
@@ -360,13 +362,11 @@ export class CuratorOrchestrator {
       };
       if (await this.reconcileRow(row)) return "failed";
 
-      // Re-read the exact turn (the claim does not carry a snapshot).
-      const read = await this.adapter.readWholeTurn(agent, row.turnId);
+      // Prefer the exact completion-time capture; legacy/expired rows must refetch.
+      const read = this.store.readCapturedTurn(row) ?? await this.adapter.readWholeTurn(agent, row.turnId);
 
-      // The durable row stores only the source id and turn, so `agent` above
-      // is a placeholder. Rebuild the source identity from the re-read: the
-      // adapter recovered the authoritative provider/cwd from the timeline
-      // payload's agent snapshot. The curator runs under that real identity.
+      // Queue identity alone has no routing metadata. Use the exact turn's
+      // captured or refetched provider/model/cwd, never the placeholders above.
       const rereadAgent: SourceAgent = {
         id: read.sourceAgentId,
         provider: read.provider,
@@ -381,6 +381,7 @@ export class CuratorOrchestrator {
         sourceAgentId: row.sourceAgentId,
         turnId: row.turnId,
         entries: read.entries,
+        totalEntries: read.totalEntries,
         skills,
       }).prompt;
 
@@ -388,7 +389,11 @@ export class CuratorOrchestrator {
       // infer authority or success from final prose or model-supplied identity.
       let calls = 0;
       let lastFailure = "missing successful review submission";
-      const reject = (message: string) => { lastFailure = message; return submissionError(message); };
+      const reject = (message: string) => {
+        const reply = submissionError(message, Math.max(0, MAX_SUBMISSIONS - calls));
+        lastFailure = reply.text ?? message;
+        return reply;
+      };
       const deadline = Date.now() + REVIEW_TIMEOUT_MS;
       let accepted: { key: string; reply: Awaited<ReturnType<SubmissionHandler>> } | null = null;
       let terminal = false;
@@ -473,6 +478,15 @@ export class CuratorOrchestrator {
       // failure. Reconcile it now, even on the last retry, before failing.
       if (this.store.isClaimCurrent(row.id, row.attempts)) {
         try { if (await this.reconcileRow(row)) return "failed"; } catch { /* receipt remains for recovery */ }
+      }
+      // A successful earlier completion read proves this identity once existed.
+      // Exhausted history now cannot be recovered by rerunning the same lookup.
+      // Unwitnessed legacy rows and reset/gap/fetch races retain normal retries.
+      if (err instanceof TurnReadError && err.reason === "turn-not-found"
+        && this.store.hasCapturedTurn(row.id)) {
+        if (!this.store.fail(row.id, "source-history-unavailable: previously captured turn no longer retained; no replacement history used", row.attempts)) return "stale";
+        await this.notifyBestEffort({ outcome: "failed", sourceAgentId: row.sourceAgentId, turnId: row.turnId });
+        return "failed";
       }
       // Bounded and content-free: only the identity and a safe category.
       // Never a transcript or model output fragment.

@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { chmodSync, existsSync } from "node:fs";
+import type { WholeTurnRead } from "./paseo-adapter";
 import { DatabaseSync } from "node:sqlite";
 import { AuditRecordSchema, QueueRecordSchema, type AuditRecord, type QueueRecord, type QueueStatus } from "./contracts";
 import type { SkillLifecycleState, SkillTelemetry } from "./maintenance";
@@ -7,7 +10,7 @@ import type { SkillLifecycleState, SkillTelemetry } from "./maintenance";
  *
  * The store owns:
  *  - the per-agent accumulated tool-iteration counter,
- *  - the review queue (keyed by sourceAgentId + turnId),
+ *  - the review queue (keyed by sourceAgentId + turnId) and bounded source captures,
  *  - the lifecycle state machine (pending -> running -> applied|nothing_to_save|failed),
  *  - and the single reset rule for the counter.
  *
@@ -75,6 +78,12 @@ export class CuratorStore {
 
   constructor(dbPath: string, config?: Partial<StoreConfig>) {
     this.db = new DatabaseSync(dbPath);
+    // Captures contain source text. Existing installs may have a 0644 ledger.
+    if (dbPath !== ":memory:") {
+      for (const path of [dbPath, dbPath + "-wal", dbPath + "-shm"]) {
+        if (existsSync(path)) chmodSync(path, 0o600);
+      }
+    }
     this.reviewThreshold = config?.reviewThreshold ?? 10;
     this.maxRetries = config?.maxRetries ?? 3;
     this.now = config?.now ?? (() => new Date());
@@ -82,6 +91,7 @@ export class CuratorStore {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.tx(() => this.migrate());
+    this.pruneCapturedTurns();
   }
 
   /** Close the underlying database. */
@@ -254,9 +264,58 @@ export class CuratorStore {
         SELECT source_agent_id, turn_id, updated_at FROM queue;
     `);
 
+    // A separate content-free witness is needed: observed_turns was historically
+    // backfilled from the queue and cannot prove a source read ever succeeded.
+    const queueColumns = this.db.prepare("PRAGMA table_info(queue)").all() as Array<{ name: string }>;
+    if (!queueColumns.some(column => column.name === "source_captured")) {
+      this.db.exec("ALTER TABLE queue ADD COLUMN source_captured INTEGER NOT NULL DEFAULT 0");
+    }
+    // Additive: no existing row is rewritten or backfilled with guessed history.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS captured_turns (
+        queue_id TEXT PRIMARY KEY REFERENCES queue(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL CHECK(length(payload) <= 512000),
+        expires_at TEXT NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS delete_terminal_turn_capture AFTER UPDATE OF status ON queue
+      WHEN NEW.status IN ('applied','nothing_to_save','failed') BEGIN
+        DELETE FROM captured_turns WHERE queue_id = NEW.id;
+      END;
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, '${this.now().toISOString()}');
+    `);
+
     this.db
       .prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)")
       .run(1, new Date().toISOString());
+  }
+
+  /** Logical deletion; SQLite WAL/backups and provider history have separate retention. */
+  deleteCapturedTurns(sourceAgentId: string): void {
+    this.db.prepare("DELETE FROM captured_turns WHERE queue_id IN (SELECT id FROM queue WHERE source_agent_id = ?)").run(sourceAgentId);
+  }
+
+  /** At most 100 bounded captures, retained for at most 24 hours while active. */
+  pruneCapturedTurns(): void {
+    this.db.prepare("DELETE FROM captured_turns WHERE expires_at <= ? OR queue_id IN (SELECT id FROM queue WHERE status NOT IN ('pending','running'))")
+      .run(this.now().toISOString());
+    this.db.exec("DELETE FROM captured_turns WHERE queue_id NOT IN (SELECT queue_id FROM captured_turns ORDER BY rowid DESC LIMIT 100)");
+  }
+
+  hasCapturedTurn(id: string): boolean {
+    const row = this.db.prepare("SELECT source_captured FROM queue WHERE id = ?").get(id) as { source_captured: number } | undefined;
+    return row?.source_captured === 1;
+  }
+
+  readCapturedTurn(row: QueueRecord): WholeTurnRead | null {
+    // Expiry is enforced without a write lock; physical pruning is independent.
+    const capture = this.db.prepare(`SELECT payload FROM captured_turns
+      JOIN queue ON queue.id = captured_turns.queue_id
+      WHERE queue_id = ? AND expires_at > ? AND queue.status IN ('pending','running')`)
+      .get(row.id, this.now().toISOString()) as { payload: string } | undefined;
+    if (!capture) return null;
+    const read = CapturedTurnSchema.parse(JSON.parse(capture.payload));
+    if (read.sourceAgentId !== row.sourceAgentId || read.turnId !== row.turnId) throw new Error("captured turn identity mismatch");
+    return read;
   }
 
   getReconciliationCursor(): string | null {
@@ -416,7 +475,10 @@ export class CuratorStore {
    *          queued turn was absorbed). A double-fired hook event for the same
    *          turn therefore always observes a durably-present row.
    */
-  recordIteration(sourceAgentId: string, iterations: number, turnId = "turn-1"): boolean {
+  recordIteration(sourceAgentId: string, iterations: number, turnId = "turn-1", capturedTurn?: WholeTurnRead): boolean {
+    if (capturedTurn !== undefined && (capturedTurn.sourceAgentId !== sourceAgentId || capturedTurn.turnId !== turnId)) {
+      throw new Error("captured turn identity mismatch");
+    }
     return this.tx(() => {
       const exists = this.db
         .prepare("SELECT id FROM queue WHERE source_agent_id = ? AND turn_id = ?")
@@ -435,7 +497,11 @@ export class CuratorStore {
       const next = current + iterations;
 
       if (next >= this.reviewThreshold) {
-        this.createQueueRow(sourceAgentId, turnId);
+        let payload: string | undefined;
+        if (capturedTurn !== undefined) {
+          try { payload = encodeCapturedTurn(capturedTurn); } catch { /* optional capture must not stall cadence or recovery */ }
+        }
+        this.createQueueRow(sourceAgentId, turnId, payload);
         this.setCounter(sourceAgentId, 0);
         return true;
       }
@@ -459,7 +525,7 @@ export class CuratorStore {
   }
 
   /** Create a pending queue row. */
-  private createQueueRow(sourceAgentId: string, turnId: string): void {
+  private createQueueRow(sourceAgentId: string, turnId: string, payload?: string): void {
     const id = randomId();
     const now = this.now().toISOString();
     this.db
@@ -469,6 +535,12 @@ export class CuratorStore {
          VALUES (?, ?, ?, 'pending', ?, ?, 0, NULL, NULL, NULL)`,
       )
       .run(id, sourceAgentId, turnId, now, now);
+    if (payload !== undefined) {
+      this.db.prepare("UPDATE queue SET source_captured = 1 WHERE id = ?").run(id);
+      this.db.prepare("INSERT INTO captured_turns(queue_id, payload, expires_at) VALUES (?, ?, ?)")
+        .run(id, payload, new Date(this.now().getTime() + 24 * 60 * 60 * 1000).toISOString());
+      this.pruneCapturedTurns();
+    }
   }
 
   /**
@@ -753,4 +825,25 @@ export class CuratorStore {
 /** A small unique id generator. */
 function randomId(): string {
   return `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Keep one extra entry/character so the prompt preserves its omission markers.
+// Never persist raw tool arguments or full history.
+const CapturedTurnSchema = z.object({
+  sourceAgentId: z.string().min(1).max(512), turnId: z.string().min(1).max(512),
+  provider: z.string().max(512), model: z.string().max(512).nullable(), cwd: z.string().max(4096),
+  entries: z.array(z.object({ role: z.enum(["user", "assistant", "tool", "system"]), content: z.string().max(4001) }).strict()).max(31),
+  totalEntries: z.number().int().nonnegative().optional(),
+  toolIterations: z.number().int().nonnegative(), usedSkillNames: z.array(z.string().max(128)).max(200),
+}).strict();
+
+function encodeCapturedTurn(read: WholeTurnRead): string {
+  const bounded = CapturedTurnSchema.parse({ ...read,
+    entries: read.entries.slice(-31).map(entry => ({ ...entry, content: entry.content.slice(0, 4001) })),
+    totalEntries: read.totalEntries ?? read.entries.length,
+    usedSkillNames: read.usedSkillNames.slice(0, 200),
+  });
+  const payload = JSON.stringify(bounded);
+  if (Buffer.byteLength(payload, "utf8") > 512000) throw new Error("captured turn exceeds storage bound");
+  return payload;
 }
